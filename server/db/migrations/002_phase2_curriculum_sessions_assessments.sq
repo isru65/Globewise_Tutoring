@@ -1,0 +1,191 @@
+-- ============================================================
+-- 1. CURRICULUM HIERARCHY & PREREQUISITES
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS curriculum_versions (
+  id BIGSERIAL PRIMARY KEY,
+  version_label VARCHAR(64) NOT NULL,
+  is_active BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS curriculum_nodes (
+  id BIGSERIAL PRIMARY KEY,
+  version_id BIGINT NOT NULL REFERENCES curriculum_versions(id) ON DELETE CASCADE,
+  parent_id BIGINT REFERENCES curriculum_nodes(id) ON DELETE CASCADE,
+  node_type VARCHAR(24) NOT NULL CHECK (node_type IN ('MAIN_TOPIC', 'SUBTOPIC', 'SESSION', 'CONCEPT')),
+  code VARCHAR(32),
+  state_standard_code VARCHAR(64),
+  custom_standard_code VARCHAR(64),
+  title VARCHAR(255) NOT NULL,
+  description TEXT,
+  learning_objective TEXT,
+  country VARCHAR(100),
+  state_region VARCHAR(100),
+  grade_level VARCHAR(64),
+  subject VARCHAR(100),
+  sort_order INT NOT NULL DEFAULT 0,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_curriculum_nodes_parent ON curriculum_nodes(parent_id, sort_order);
+CREATE INDEX idx_curriculum_nodes_filters ON curriculum_nodes(version_id, country, state_region, grade_level, subject, node_type);
+
+CREATE TABLE IF NOT EXISTS session_dependencies (
+  id BIGSERIAL PRIMARY KEY,
+  session_node_id BIGINT NOT NULL REFERENCES curriculum_nodes(id) ON DELETE CASCADE,
+  prerequisite_session_id BIGINT NOT NULL REFERENCES curriculum_nodes(id) ON DELETE CASCADE,
+  week_badge VARCHAR(32),
+  rationale TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT uq_session_dependency UNIQUE (session_node_id, prerequisite_session_id),
+  CONSTRAINT chk_no_self_prereq CHECK (session_node_id <> prerequisite_session_id)
+);
+
+-- ============================================================
+-- 2. STUDENT SYLLABUS OVERRIDES, SCHEDULE & WEEKLY PACING
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS student_syllabus_overrides (
+  id BIGSERIAL PRIMARY KEY,
+  student_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  curriculum_node_id BIGINT NOT NULL REFERENCES curriculum_nodes(id) ON DELETE CASCADE,
+  custom_order INT NOT NULL DEFAULT 0,
+  is_excluded BOOLEAN NOT NULL DEFAULT FALSE,
+  mastery_status VARCHAR(32) NOT NULL DEFAULT 'NOT_STARTED'
+    CHECK (mastery_status IN ('NOT_STARTED', 'MASTERED', 'VALIDATED_AHEAD', 'ATTEMPTED', 'TARGETED_FOCUS')),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT uq_student_node_override UNIQUE (student_id, curriculum_node_id)
+);
+
+CREATE TABLE IF NOT EXISTS student_schedule_blocks (
+  id BIGSERIAL PRIMARY KEY,
+  student_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  block_label VARCHAR(32) NOT NULL, -- e.g. Block-1, Block-2, Block-3
+  day_of_week VARCHAR(16) NOT NULL,
+  start_time TIME NOT NULL,
+  end_time TIME NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS weekly_syllabus_items (
+  id BIGSERIAL PRIMARY KEY,
+  student_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  academic_year VARCHAR(24) NOT NULL,
+  week_number INT NOT NULL CHECK (week_number >= 1),
+  week_start_date DATE,
+  week_end_date DATE,
+  item_type VARCHAR(16) NOT NULL CHECK (item_type IN ('SESSION', 'BREAK')),
+  session_node_id BIGINT REFERENCES curriculum_nodes(id) ON DELETE SET NULL,
+  break_title VARCHAR(255),
+  break_description TEXT,
+  break_type VARCHAR(64),
+  week_order INT NOT NULL DEFAULT 0,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_weekly_syllabus_student_week ON weekly_syllabus_items(student_id, academic_year, week_number, week_order);
+
+-- ============================================================
+-- 3. AI SESSION MATERIALS, GAMIFIED TIERS & SESSIONS
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS session_materials (
+  id BIGSERIAL PRIMARY KEY,
+  session_node_id BIGINT REFERENCES curriculum_nodes(id) ON DELETE SET NULL,
+  created_by BIGINT REFERENCES users(id) ON DELETE SET NULL,
+  title VARCHAR(255) NOT NULL,
+  subject VARCHAR(100),
+  grade_level VARCHAR(64),
+  region_tag VARCHAR(100),
+  material_type VARCHAR(64) DEFAULT 'Concept',
+  prompt_type VARCHAR(64) DEFAULT 'General Concept - V2',
+  summary TEXT,
+  sections_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+  practice_questions_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+  concept_doc_url TEXT,
+  practice_doc_url TEXT,
+  audio_narration_url TEXT,
+  generation_status VARCHAR(24) NOT NULL DEFAULT 'PENDING'
+    CHECK (generation_status IN ('PENDING', 'GENERATING', 'READY', 'FAILED')),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS material_gamified_levels (
+  id BIGSERIAL PRIMARY KEY,
+  session_material_id BIGINT NOT NULL REFERENCES session_materials(id) ON DELETE CASCADE,
+  tier_color VARCHAR(16) NOT NULL CHECK (tier_color IN ('YELLOW', 'BLUE', 'PURPLE', 'GREEN')),
+  title VARCHAR(120) NOT NULL,
+  coin_cost INT NOT NULL DEFAULT 0,
+  reward_points INT NOT NULL DEFAULT 0,
+  activities_json JSONB NOT NULL DEFAULT '[]'::jsonb
+);
+
+-- Extend your existing tutoring_sessions table if already present, or create it:
+CREATE TABLE IF NOT EXISTS tutoring_sessions (
+  id BIGSERIAL PRIMARY KEY,
+  tutor_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  student_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  curriculum_session_id BIGINT REFERENCES curriculum_nodes(id) ON DELETE SET NULL,
+  attached_material_id BIGINT REFERENCES session_materials(id) ON DELETE SET NULL,
+  title VARCHAR(255) NOT NULL,
+  session_date DATE NOT NULL,
+  time_block_label VARCHAR(64),
+  meeting_url TEXT,
+  pre_session_note TEXT,
+  status VARCHAR(24) NOT NULL DEFAULT 'UPCOMING'
+    CHECK (status IN ('UPCOMING', 'COMPLETED', 'CANCELLED')),
+  is_active BOOLEAN NOT NULL DEFAULT TRUE,
+  session_prepared BOOLEAN NOT NULL DEFAULT FALSE,
+  reminder_sent BOOLEAN NOT NULL DEFAULT FALSE,
+  tutor_ready BOOLEAN NOT NULL DEFAULT FALSE,
+  tutor_joined BOOLEAN NOT NULL DEFAULT FALSE,
+  student_joined BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_sessions_tutor_status ON tutoring_sessions(tutor_id, status, session_date);
+CREATE INDEX idx_sessions_student_status ON tutoring_sessions(student_id, status, session_date);
+
+-- ============================================================
+-- 4. ASSESSMENTS, QUESTIONS & PROGRESSIVE HINTS
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS assessments (
+  id BIGSERIAL PRIMARY KEY,
+  student_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  assigned_by BIGINT REFERENCES users(id) ON DELETE SET NULL,
+  title VARCHAR(255) NOT NULL,
+  assessment_type VARCHAR(32) NOT NULL
+    CHECK (assessment_type IN ('MASTERY_GAP', 'PREREQUISITE', 'READINESS', 'SESSION_BASED')),
+  subject VARCHAR(100),
+  grade_level VARCHAR(64),
+  state_region VARCHAR(100),
+  status VARCHAR(24) NOT NULL DEFAULT 'INCOMPLETE' CHECK (status IN ('INCOMPLETE', 'COMPLETED')),
+  is_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  assigned_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  completed_at TIMESTAMPTZ
+);
+
+CREATE TABLE IF NOT EXISTS assessment_questions (
+  id BIGSERIAL PRIMARY KEY,
+  assessment_id BIGINT NOT NULL REFERENCES assessments(id) ON DELETE CASCADE,
+  concept_node_id BIGINT REFERENCES curriculum_nodes(id) ON DELETE SET NULL,
+  question_order INT NOT NULL,
+  prompt TEXT NOT NULL,
+  question_type VARCHAR(24) NOT NULL DEFAULT 'MULTIPLE_CHOICE',
+  options_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+  correct_answer TEXT NOT NULL,
+  hints_json JSONB NOT NULL DEFAULT '[]'::jsonb, -- ordered array of hints e.g. ["Hint 1...", "Hint 2..."]
+  hints_revealed_count INT NOT NULL DEFAULT 0,
+  student_answer TEXT,
+  is_correct BOOLEAN,
+  points_value INT NOT NULL DEFAULT 10,
+  points_earned INT NOT NULL DEFAULT 0,
+  answered_at TIMESTAMPTZ
+);
+
+CREATE INDEX idx_assessment_questions_order ON assessment_questions(assessment_id, question_order);

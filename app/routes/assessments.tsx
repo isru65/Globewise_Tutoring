@@ -1,291 +1,769 @@
-import { useActionMutation, useActionQuery } from "@agent-native/core/client/hooks";
-import { useState, type FormEvent } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
+import Layout from "../components/layout/Layout.js";
+import { DEEP_BLUE_THEME } from "../design-system.js";
+import useCurrentUser from "../hooks/use-current-user.js";
 
-import { EmptyState, ErrorNote, FieldLabel, PageHeader, Section, StatusBadge, fieldClass } from "@/components/app/primitives";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { useCurrentUser } from "@/hooks/use-current-user";
-import { GRADE_OPTIONS, errorText, gradeLabel, label } from "@/lib/globewise";
-
-export function meta() {
-  return [{ title: "Assessments · Globewise Tutoring" }];
+export interface AssessmentRecord {
+  id: string;
+  title: string;
+  subject: string;
+  gradeLevel: number;
+  topicId?: string | null;
+  passingScore: number;
+  timeLimitMinutes?: number | null;
+  published?: boolean;
+  createdByEmail?: string;
 }
 
-const QUESTION_TYPES = ["multiple_choice", "multiple_select", "true_false", "short_answer", "numeric"] as const;
-type QuestionType = (typeof QUESTION_TYPES)[number];
-
-type Draft = { questionType: QuestionType; prompt: string; options: string; answer: string; points: number };
-const EMPTY_QUESTION: Draft = { questionType: "multiple_choice", prompt: "", options: "", answer: "", points: 1 };
-
-function toQuestion(draft: Draft) {
-  const options = ["multiple_choice", "multiple_select"].includes(draft.questionType)
-    ? draft.options.split("|").map((o) => o.trim()).filter(Boolean)
-    : undefined;
-  let correctAnswer: string | number | boolean | string[];
-  if (draft.questionType === "true_false") correctAnswer = draft.answer.trim().toLowerCase() === "true";
-  else if (draft.questionType === "numeric") correctAnswer = Number(draft.answer);
-  else if (draft.questionType === "multiple_select") correctAnswer = draft.answer.split("|").map((a) => a.trim()).filter(Boolean);
-  else correctAnswer = draft.answer.trim();
-  return { questionType: draft.questionType, prompt: draft.prompt.trim(), options, correctAnswer, points: draft.points };
+export interface AssessmentQuestionRecord {
+  id: string;
+  assessmentId: string;
+  prompt: string;
+  questionType?: string;
+  options?: string[];
+  points?: number;
+  sortOrder?: number;
 }
 
-function AssessmentBuilder() {
-  const create = useActionMutation("create-assessment");
-  const [meta, setMeta] = useState({ title: "", subject: "Mathematics", gradeLevel: 3, timeLimitMinutes: 15, attemptLimit: 2, passingScore: 70, status: "published" as "draft" | "published" });
-  const [questions, setQuestions] = useState<Draft[]>([{ ...EMPTY_QUESTION }]);
-
-  function update(index: number, patch: Partial<Draft>) {
-    setQuestions((list) => list.map((q, i) => (i === index ? { ...q, ...patch } : q)));
-  }
-
-  function submit(event: FormEvent) {
-    event.preventDefault();
-    create.mutate(
-      { ...meta, timeLimitMinutes: meta.timeLimitMinutes || null, questions: questions.filter((q) => q.prompt.trim()).map(toQuestion) },
-      { onSuccess: () => { setMeta((m) => ({ ...m, title: "" })); setQuestions([{ ...EMPTY_QUESTION }]); } },
-    );
-  }
-
-  return (
-    <Section title="Build an assessment" description="Answer keys stay hidden from students. Use | to separate choices or multiple answers.">
-      <form onSubmit={submit} className="space-y-5">
-        <div className="grid gap-4 md:grid-cols-4">
-          <label className="block md:col-span-2">
-            <FieldLabel>Title</FieldLabel>
-            <Input required value={meta.title} onChange={(e) => setMeta({ ...meta, title: e.target.value })} />
-          </label>
-          <label className="block">
-            <FieldLabel>Subject</FieldLabel>
-            <Input required value={meta.subject} onChange={(e) => setMeta({ ...meta, subject: e.target.value })} />
-          </label>
-          <label className="block">
-            <FieldLabel>Grade</FieldLabel>
-            <select className={fieldClass} value={meta.gradeLevel} onChange={(e) => setMeta({ ...meta, gradeLevel: Number(e.target.value) })}>
-              {GRADE_OPTIONS.map((g) => <option key={g} value={g}>{gradeLabel(g)}</option>)}
-            </select>
-          </label>
-          <label className="block">
-            <FieldLabel>Time limit (min)</FieldLabel>
-            <Input type="number" min={1} max={240} value={meta.timeLimitMinutes} onChange={(e) => setMeta({ ...meta, timeLimitMinutes: Number(e.target.value) })} />
-          </label>
-          <label className="block">
-            <FieldLabel>Attempts allowed</FieldLabel>
-            <Input type="number" min={1} max={10} value={meta.attemptLimit} onChange={(e) => setMeta({ ...meta, attemptLimit: Number(e.target.value) })} />
-          </label>
-          <label className="block">
-            <FieldLabel>Passing score (%)</FieldLabel>
-            <Input type="number" min={0} max={100} value={meta.passingScore} onChange={(e) => setMeta({ ...meta, passingScore: Number(e.target.value) })} />
-          </label>
-          <label className="block">
-            <FieldLabel>Status</FieldLabel>
-            <select className={fieldClass} value={meta.status} onChange={(e) => setMeta({ ...meta, status: e.target.value as "draft" | "published" })}>
-              <option value="published">Published</option>
-              <option value="draft">Draft</option>
-            </select>
-          </label>
-        </div>
-
-        {questions.map((q, index) => (
-          <div key={index} className="grid gap-3 rounded-md border border-border p-4 md:grid-cols-[1fr_2fr]">
-            <label className="block">
-              <FieldLabel>Question {index + 1} type</FieldLabel>
-              <select className={fieldClass} value={q.questionType} onChange={(e) => update(index, { questionType: e.target.value as QuestionType })}>
-                {QUESTION_TYPES.map((t) => <option key={t} value={t}>{label(t.replace(/_/g, " "))}</option>)}
-              </select>
-            </label>
-            <label className="block">
-              <FieldLabel>Prompt</FieldLabel>
-              <Input value={q.prompt} onChange={(e) => update(index, { prompt: e.target.value })} />
-            </label>
-            {["multiple_choice", "multiple_select"].includes(q.questionType) ? (
-              <label className="block">
-                <FieldLabel>Choices</FieldLabel>
-                <Input value={q.options} onChange={(e) => update(index, { options: e.target.value })} placeholder="A | B | C" />
-              </label>
-            ) : null}
-            <label className="block">
-              <FieldLabel>Correct answer{q.questionType === "true_false" ? " (true or false)" : ""}</FieldLabel>
-              <Input value={q.answer} onChange={(e) => update(index, { answer: e.target.value })} />
-            </label>
-            <div className="md:col-span-2 flex justify-end">
-              <Button type="button" variant="ghost" size="sm" disabled={questions.length === 1} onClick={() => setQuestions((list) => list.filter((_, i) => i !== index))}>
-                Remove question
-              </Button>
-            </div>
-          </div>
-        ))}
-        <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border pt-4">
-          <Button type="button" variant="outline" size="sm" onClick={() => setQuestions((list) => [...list, { ...EMPTY_QUESTION }])}>Add question</Button>
-          <div className="flex items-center gap-3">
-            <ErrorNote error={create.error ? new Error(errorText(create.error)) : null} />
-            <Button type="submit" disabled={create.isPending || !meta.title.trim()}>Save assessment</Button>
-          </div>
-        </div>
-      </form>
-    </Section>
-  );
+export interface AssessmentAttemptRecord {
+  id: string;
+  assessmentId: string;
+  studentId: string;
+  scorePercent: number;
+  passed: boolean;
+  submittedAt?: string;
 }
 
-function TakeAssessment({ assessmentId, studentId, onDone }: { assessmentId: string; studentId: string; onDone: () => void }) {
-  const questions = useActionQuery("list-assessment-questions", { assessmentId });
-  const start = useActionMutation("start-assessment-attempt");
-  const submit = useActionMutation("submit-assessment-attempt");
-  const [attemptId, setAttemptId] = useState<string | null>(null);
-  const [answers, setAnswers] = useState<Record<string, unknown>>({});
-  const [result, setResult] = useState<{ percent: number; passed: boolean; status: string } | null>(null);
+interface StudentSummary {
+  id: string;
+  firstName: string;
+  lastName: string;
+  gradeLevel: number;
+}
 
-  function begin() {
-    start.mutate(
-      { assessmentId, studentId },
-      { onSuccess: (attempt) => attempt && setAttemptId(attempt.id) },
-    );
-  }
-
-  function set(id: string, value: unknown) {
-    setAnswers((a) => ({ ...a, [id]: value }));
-  }
-
-  function finish(event: FormEvent) {
-    event.preventDefault();
-    if (!attemptId) return;
-    submit.mutate({ attemptId, answers }, {
-      onSuccess: (data) => data && setResult({ percent: data.percent, passed: data.passed, status: data.status }),
-    });
-  }
-
-  if (result) {
-    return (
-      <Section title="Submitted" action={<Button variant="outline" size="sm" onClick={onDone}>Back</Button>}>
-        <p className="text-sm text-foreground">
-          {result.status === "pending_grading"
-            ? "Your tutor will grade the written answers."
-            : `You scored ${result.percent}%. ${result.passed ? "You passed." : "Keep practicing and try again."}`}
-        </p>
-      </Section>
-    );
-  }
-
-  return (
-    <Section title="Take assessment" action={<Button variant="outline" size="sm" onClick={onDone}>Close</Button>}>
-      {!attemptId ? (
-        <div className="space-y-3">
-          <p className="text-sm text-muted-foreground">Starting an attempt counts toward your limit.</p>
-          <Button onClick={begin} disabled={start.isPending}>Start attempt</Button>
-          <ErrorNote error={start.error ? new Error(errorText(start.error)) : null} />
-        </div>
-      ) : (
-        <form onSubmit={finish} className="space-y-6">
-          {(questions.data ?? []).map((q, index) => (
-            <fieldset key={q.id} className="space-y-2">
-              <legend className="text-sm font-medium text-foreground">{index + 1}. {q.prompt}</legend>
-              {q.questionType === "multiple_choice" || q.questionType === "true_false" ? (
-                <div className="flex flex-wrap gap-3">
-                  {(q.questionType === "true_false" ? ["true", "false"] : q.options ?? []).map((opt) => (
-                    <label key={opt} className="flex items-center gap-2 rounded-md border border-border px-3 py-2 text-sm">
-                      <input type="radio" name={q.id} value={opt} checked={answers[q.id] === (q.questionType === "true_false" ? opt === "true" : opt)} onChange={() => set(q.id, q.questionType === "true_false" ? opt === "true" : opt)} />
-                      {opt}
-                    </label>
-                  ))}
-                </div>
-              ) : q.questionType === "multiple_select" ? (
-                <div className="flex flex-wrap gap-3">
-                  {(q.options ?? []).map((opt) => {
-                    const chosen = Array.isArray(answers[q.id]) ? (answers[q.id] as string[]) : [];
-                    return (
-                      <label key={opt} className="flex items-center gap-2 rounded-md border border-border px-3 py-2 text-sm">
-                        <input type="checkbox" checked={chosen.includes(opt)} onChange={(e) => set(q.id, e.target.checked ? [...chosen, opt] : chosen.filter((c) => c !== opt))} />
-                        {opt}
-                      </label>
-                    );
-                  })}
-                </div>
-              ) : (
-                <Input
-                  aria-label={q.prompt}
-                  type={q.questionType === "numeric" ? "number" : "text"}
-                  step="any"
-                  value={(answers[q.id] as string | number | undefined) ?? ""}
-                  onChange={(e) => set(q.id, q.questionType === "numeric" ? Number(e.target.value) : e.target.value)}
-                />
-              )}
-            </fieldset>
-          ))}
-          <div className="flex items-center justify-between gap-3 border-t border-border pt-4">
-            <ErrorNote error={submit.error ? new Error(errorText(submit.error)) : null} />
-            <Button type="submit" disabled={submit.isPending}>Submit answers</Button>
-          </div>
-        </form>
-      )}
-    </Section>
-  );
+function formatGrade(grade: number): string {
+  return grade === 0 ? "Kindergarten (K)" : `Grade ${grade}`;
 }
 
 export default function AssessmentsRoute() {
-  const { user } = useCurrentUser();
-  const isStaff = user?.role === "tutor" || user?.role === "admin";
-  const assessments = useActionQuery("list-assessments", {});
-  const attempts = useActionQuery("list-assessment-attempts", {});
-  const students = useActionQuery("list-students", {});
-  const [taking, setTaking] = useState<string | null>(null);
-  const studentId = students.data?.[0]?.id ?? "";
-  const titleOf = new Map((assessments.data ?? []).map((a) => [a.id, a.title]));
+  const { user, loading: userLoading, refresh: refreshUser } = useCurrentUser();
+
+  const [students, setStudents] = useState<StudentSummary[]>([]);
+  const [selectedStudentId, setSelectedStudentId] = useState<string>("");
+  const [assessments, setAssessments] = useState<AssessmentRecord[]>([]);
+  const [selectedAssessmentId, setSelectedAssessmentId] = useState<string>("");
+  const [questions, setQuestions] = useState<AssessmentQuestionRecord[]>([]);
+  const [attempts, setAttempts] = useState<AssessmentAttemptRecord[]>([]);
+
+  const [answers, setAnswers] = useState<Record<string, string>>({});
+  const [loading, setLoading] = useState<boolean>(true);
+  const [loadingQuestions, setLoadingQuestions] = useState<boolean>(false);
+  const [submittingAttempt, setSubmittingAttempt] = useState<boolean>(false);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  // Tutor / Admin create assessment form
+  const [showCreateForm, setShowCreateForm] = useState<boolean>(false);
+  const [creating, setCreating] = useState<boolean>(false);
+  const [createForm, setCreateForm] = useState({
+    title: "",
+    subject: "Mathematics",
+    gradeLevel: 4,
+    passingScore: 70,
+    timeLimitMinutes: 20,
+    samplePrompt: "",
+    sampleOptionsText: "Option A, Option B, Option C, Option D",
+    sampleCorrectAnswer: "Option A",
+  });
+
+  const canCreateAssessment = user?.role === "tutor" || user?.role === "admin";
+  const canTakeAssessment = user?.role === "student";
+
+  const loadStudents = useCallback(async () => {
+    try {
+      const res = await fetch("/api/v1/me?page=1&page_size=100", {
+        credentials: "include",
+        headers: { Accept: "application/json" },
+      });
+      if (!res.ok) return;
+      const payload = await res.json();
+      const list: StudentSummary[] = Array.isArray(payload?.data?.accessibleStudents?.data)
+        ? payload.data.accessibleStudents.data
+        : [];
+      setStudents(list);
+      const firstStudent = list[0];
+      if (!selectedStudentId && firstStudent && user?.role !== "admin") {
+        setSelectedStudentId(firstStudent.id);
+      }
+    } catch {
+      // Non-blocking fallback
+    }
+  }, [selectedStudentId, user?.role]);
+
+  const loadAssessmentsAndAttempts = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const [assessmentsRes, attemptsRes] = await Promise.all([
+        fetch("/api/v1/assessments", {
+          credentials: "include",
+          headers: { Accept: "application/json" },
+        }),
+        fetch(
+          `/api/v1/assessment-attempts${
+            selectedStudentId ? `?studentId=${encodeURIComponent(selectedStudentId)}` : ""
+          }`,
+          {
+            credentials: "include",
+            headers: { Accept: "application/json" },
+          },
+        ),
+      ]);
+
+      if (assessmentsRes.ok) {
+        const payload = await assessmentsRes.json();
+        const list: AssessmentRecord[] = Array.isArray(payload?.data)
+          ? payload.data
+          : Array.isArray(payload?.data?.items)
+            ? payload.data.items
+            : [];
+        setAssessments(list);
+        const firstAssessment = list[0];
+        if (firstAssessment) {
+          const exists = list.some((a) => a.id === selectedAssessmentId);
+          if (!exists) {
+            setSelectedAssessmentId(firstAssessment.id);
+          }
+        } else {
+          setSelectedAssessmentId("");
+          setQuestions([]);
+        }
+      } else if (assessmentsRes.status !== 404) {
+        throw new Error(`Unable to load assessments (${assessmentsRes.status})`);
+      } else {
+        setAssessments([]);
+      }
+
+      if (attemptsRes.ok) {
+        const attPayload = await attemptsRes.json();
+        const attList: AssessmentAttemptRecord[] = Array.isArray(attPayload?.data)
+          ? attPayload.data
+          : Array.isArray(attPayload?.data?.items)
+            ? attPayload.data.items
+            : [];
+        setAttempts(attList);
+      } else {
+        setAttempts([]);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load assessments");
+    } finally {
+      setLoading(false);
+    }
+  }, [selectedAssessmentId, selectedStudentId]);
+
+  const loadQuestions = useCallback(async (assessmentId: string) => {
+    if (!assessmentId) {
+      setQuestions([]);
+      setAnswers({});
+      return;
+    }
+    setLoadingQuestions(true);
+    try {
+      const res = await fetch(
+        `/api/v1/assessments/${encodeURIComponent(assessmentId)}/questions`,
+        {
+          credentials: "include",
+          headers: { Accept: "application/json" },
+        },
+      );
+      if (!res.ok) {
+        setQuestions([]);
+        setAnswers({});
+        setLoadingQuestions(false);
+        return;
+      }
+      const payload = await res.json();
+      const qList: AssessmentQuestionRecord[] = Array.isArray(payload?.data)
+        ? payload.data
+        : Array.isArray(payload?.data?.items)
+          ? payload.data.items
+          : [];
+      const sorted = [...qList].sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0));
+      setQuestions(sorted);
+      setAnswers({});
+    } catch {
+      setQuestions([]);
+      setAnswers({});
+    } finally {
+      setLoadingQuestions(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!userLoading) {
+      void loadStudents();
+      void loadAssessmentsAndAttempts();
+    }
+  }, [userLoading, loadStudents, loadAssessmentsAndAttempts]);
+
+  useEffect(() => {
+    void loadQuestions(selectedAssessmentId);
+  }, [selectedAssessmentId, loadQuestions]);
+
+  const selectedAssessment = useMemo(
+    () => assessments.find((a) => a.id === selectedAssessmentId) ?? null,
+    [assessments, selectedAssessmentId],
+  );
+
+  const assessmentAttempts = useMemo(
+    () => attempts.filter((att) => att.assessmentId === selectedAssessmentId),
+    [attempts, selectedAssessmentId],
+  );
+
+  async function handleCreateAssessment(e: React.FormEvent) {
+    e.preventDefault();
+    if (!canCreateAssessment || !createForm.title.trim()) return;
+
+    setCreating(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const parsedOptions = createForm.sampleOptionsText
+        .split(",")
+        .map((opt) => opt.trim())
+        .filter(Boolean);
+
+      const res = await fetch("/api/v1/assessments", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: createForm.title.trim(),
+          subject: createForm.subject.trim(),
+          gradeLevel: Number(createForm.gradeLevel),
+          passingScore: Number(createForm.passingScore) || 70,
+          timeLimitMinutes: Number(createForm.timeLimitMinutes) || 20,
+          published: true,
+          initialQuestion: createForm.samplePrompt.trim()
+            ? {
+                prompt: createForm.samplePrompt.trim(),
+                options: parsedOptions.length > 0 ? parsedOptions : undefined,
+                correctAnswer: createForm.sampleCorrectAnswer.trim() || undefined,
+              }
+            : undefined,
+        }),
+      });
+
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(payload?.error?.message || `Failed to create assessment (${res.status})`);
+      }
+
+      setCreateForm((prev) => ({
+        ...prev,
+        title: "",
+        samplePrompt: "",
+      }));
+      setShowCreateForm(false);
+      setNotice("Assessment created.");
+      await loadAssessmentsAndAttempts();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not create assessment");
+    } finally {
+      setCreating(false);
+    }
+  }
+
+  async function handleSubmitAttempt(e: React.FormEvent) {
+    e.preventDefault();
+    if (!selectedAssessment) return;
+
+    const targetStudentId = selectedStudentId || students[0]?.id;
+    if (!targetStudentId) {
+      setError("No student profile found for attempt submission.");
+      return;
+    }
+
+    setSubmittingAttempt(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const res = await fetch(
+        `/api/v1/assessments/${encodeURIComponent(selectedAssessment.id)}/attempts/submit`,
+        {
+          method: "POST",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            studentId: targetStudentId,
+            answers,
+          }),
+        },
+      );
+
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(payload?.error?.message || `Attempt submission failed (${res.status})`);
+      }
+
+      const result = payload?.data ?? {};
+      const score =
+        typeof result.scorePercent === "number" ? `${result.scorePercent}%` : "recorded";
+      const statusLabel = result.passed === true ? "Passed" : result.passed === false ? "Needs Review" : "Submitted";
+      setNotice(`Attempt submitted — Score: ${score} (${statusLabel}).`);
+      await loadAssessmentsAndAttempts();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not submit assessment attempt");
+    } finally {
+      setSubmittingAttempt(false);
+    }
+  }
+
+  if (userLoading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-[#0F172A] text-white text-sm">
+        Loading assessments workspace...
+      </div>
+    );
+  }
 
   return (
-    <>
-      <PageHeader
-        title="Assessments"
-        description={isStaff ? "Build checks for understanding and review attempts." : "Check-ins from your tutor. Your best result counts toward progress."}
-      />
-      {isStaff ? <AssessmentBuilder /> : null}
-
-      {taking ? (
-        <div className="mt-6">
-          <TakeAssessment key={taking} assessmentId={taking} studentId={studentId} onDone={() => setTaking(null)} />
+    <Layout
+      title="Assessments & Mastery Checks"
+      breadcrumbs={[
+        { label: "Home", to: "/" },
+        { label: "Assessments" },
+      ]}
+      currentUser={user}
+      onSignOut={() => {
+        void refreshUser();
+      }}
+      headerActions={
+        canCreateAssessment ? (
+          <button
+            type="button"
+            onClick={() => setShowCreateForm((prev) => !prev)}
+            className="rounded-lg px-3.5 py-2 text-xs sm:text-sm font-semibold text-white transition-colors"
+            style={{ backgroundColor: DEEP_BLUE_THEME.colors.royal700 }}
+          >
+            {showCreateForm ? "Close Form" : "+ New Assessment"}
+          </button>
+        ) : undefined
+      }
+    >
+      <div className="space-y-6">
+        {/* Deep Blue / Navy Header Banner */}
+        <div
+          className="rounded-xl p-5 sm:p-6 text-white"
+          style={{
+            background: `linear-gradient(120deg, ${DEEP_BLUE_THEME.colors.navy900} 0%, ${DEEP_BLUE_THEME.colors.navy800} 100%)`,
+          }}
+        >
+          <div className="text-xs font-semibold uppercase tracking-wider text-sky-300">
+            Skill Mastery & Quizzes
+          </div>
+          <h2 className="mt-1 text-xl font-bold">
+            Topic Assessments, Attempts & Passing Status
+          </h2>
+          <p className="mt-1 text-sm text-blue-100/90 max-w-2xl">
+            Complete structured quizzes and skill checks, review scores against passing thresholds,
+            and track attempt history across linked or assigned learners.
+          </p>
         </div>
-      ) : null}
 
-      <Section title="Available assessments" className="mt-6">
-        {(assessments.data ?? []).length === 0 ? (
-          <EmptyState title="No assessments yet" />
+        {notice && (
+          <div className="rounded-lg bg-[#DCFCE7] border border-[#BBF7D0] text-[#166534] px-4 py-2.5 text-xs font-medium">
+            {notice}
+          </div>
+        )}
+
+        {error && (
+          <div className="rounded-lg bg-[#FEE2E2] border border-[#FECACA] text-[#991B1B] px-4 py-2.5 text-xs font-medium flex items-center justify-between gap-4">
+            <span>{error}</span>
+            <button
+              type="button"
+              onClick={() => setError(null)}
+              className="underline font-semibold"
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
+
+        {/* Tutor / Admin Create Assessment Form */}
+        {canCreateAssessment && showCreateForm && (
+          <form
+            onSubmit={handleCreateAssessment}
+            className="rounded-xl bg-white border border-[#CBD5E1] p-5 space-y-4 shadow-xs"
+          >
+            <h3 className="text-base font-semibold text-[#0F172A]">
+              Create Assessment
+            </h3>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+              <div className="sm:col-span-2">
+                <label className="block text-xs font-medium text-[#475569] mb-1">
+                  Assessment Title
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={createForm.title}
+                  onChange={(e) =>
+                    setCreateForm((p) => ({ ...p, title: e.target.value }))
+                  }
+                  placeholder="e.g. Grade 4 Fractions Mastery Quiz"
+                  className="w-full rounded-lg border border-[#CBD5E1] px-3 py-2 text-sm"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-[#475569] mb-1">
+                  Subject
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={createForm.subject}
+                  onChange={(e) =>
+                    setCreateForm((p) => ({ ...p, subject: e.target.value }))
+                  }
+                  className="w-full rounded-lg border border-[#CBD5E1] px-3 py-2 text-sm"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-[#475569] mb-1">
+                  Grade Level
+                </label>
+                <select
+                  value={createForm.gradeLevel}
+                  onChange={(e) =>
+                    setCreateForm((p) => ({ ...p, gradeLevel: Number(e.target.value) }))
+                  }
+                  className="w-full rounded-lg border border-[#CBD5E1] px-3 py-2 text-sm bg-white"
+                >
+                  {[0, 1, 2, 3, 4, 5, 6, 7, 8].map((g) => (
+                    <option key={g} value={g}>
+                      {formatGrade(g)}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs font-medium text-[#475569] mb-1">
+                  Passing Score (%)
+                </label>
+                <input
+                  type="number"
+                  min={1}
+                  max={100}
+                  value={createForm.passingScore}
+                  onChange={(e) =>
+                    setCreateForm((p) => ({ ...p, passingScore: Number(e.target.value) }))
+                  }
+                  className="w-full rounded-lg border border-[#CBD5E1] px-3 py-2 text-sm"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-[#475569] mb-1">
+                  Time Limit (Minutes)
+                </label>
+                <input
+                  type="number"
+                  min={1}
+                  max={180}
+                  value={createForm.timeLimitMinutes}
+                  onChange={(e) =>
+                    setCreateForm((p) => ({
+                      ...p,
+                      timeLimitMinutes: Number(e.target.value),
+                    }))
+                  }
+                  className="w-full rounded-lg border border-[#CBD5E1] px-3 py-2 text-sm"
+                />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-2 border-t border-[#F1F5F9]">
+              <div className="sm:col-span-3 text-xs font-semibold text-[#475569]">
+                Optional Initial Question
+              </div>
+              <div className="sm:col-span-3">
+                <input
+                  type="text"
+                  value={createForm.samplePrompt}
+                  onChange={(e) =>
+                    setCreateForm((p) => ({ ...p, samplePrompt: e.target.value }))
+                  }
+                  placeholder="Question prompt (optional)..."
+                  className="w-full rounded-lg border border-[#CBD5E1] px-3 py-2 text-sm"
+                />
+              </div>
+              <div className="sm:col-span-2">
+                <input
+                  type="text"
+                  value={createForm.sampleOptionsText}
+                  onChange={(e) =>
+                    setCreateForm((p) => ({ ...p, sampleOptionsText: e.target.value }))
+                  }
+                  placeholder="Comma-separated choices"
+                  className="w-full rounded-lg border border-[#CBD5E1] px-3 py-2 text-sm"
+                />
+              </div>
+              <div>
+                <input
+                  type="text"
+                  value={createForm.sampleCorrectAnswer}
+                  onChange={(e) =>
+                    setCreateForm((p) => ({
+                      ...p,
+                      sampleCorrectAnswer: e.target.value,
+                    }))
+                  }
+                  placeholder="Correct answer"
+                  className="w-full rounded-lg border border-[#CBD5E1] px-3 py-2 text-sm"
+                />
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setShowCreateForm(false)}
+                className="rounded-lg border border-[#CBD5E1] px-4 py-2 text-xs font-medium text-[#475569]"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={creating}
+                className="rounded-lg px-4 py-2 text-xs font-semibold text-white disabled:opacity-60"
+                style={{ backgroundColor: DEEP_BLUE_THEME.colors.royal700 }}
+              >
+                {creating ? "Creating..." : "Save Assessment"}
+              </button>
+            </div>
+          </form>
+        )}
+
+        {/* Student Scope Selector (for Parent / Tutor / Admin) */}
+        {students.length > 0 && (
+          <div className="rounded-xl bg-white border border-[#E2E8F0] p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+            <div className="flex-1 max-w-md">
+              <label className="block text-xs font-medium text-[#475569] mb-1">
+                Student Context for Attempts
+              </label>
+              <select
+                value={selectedStudentId}
+                onChange={(e) => setSelectedStudentId(e.target.value)}
+                className="w-full rounded-lg border border-[#CBD5E1] px-3 py-2 text-sm bg-white"
+              >
+                {user?.role === "admin" && <option value="">All Accessible Students</option>}
+                {students.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.firstName} {s.lastName} ({formatGrade(s.gradeLevel)})
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="text-xs text-[#64748B]">
+              <span className="font-semibold text-[#0F172A]">{assessments.length}</span>{" "}
+              assessment{assessments.length === 1 ? "" : "s"} available
+            </div>
+          </div>
+        )}
+
+        {/* Main Assessments Workspace */}
+        {loading ? (
+          <div className="rounded-xl bg-white border border-[#E2E8F0] p-8 text-center text-sm text-[#64748B]">
+            Loading assessments...
+          </div>
+        ) : assessments.length === 0 ? (
+          <div className="rounded-xl bg-white border border-[#E2E8F0] p-8 text-center">
+            <div className="text-base font-semibold text-[#0F172A]">
+              No assessments available yet
+            </div>
+            <p className="mt-1 text-sm text-[#64748B]">
+              {canCreateAssessment
+                ? "Click '+ New Assessment' above to create a quiz or mastery check."
+                : "Your tutor will publish skill assessments here as you progress through topics."}
+            </p>
+          </div>
         ) : (
-          <ul className="divide-y divide-border">
-            {(assessments.data ?? []).map((a) => (
-              <li key={a.id} className="flex flex-wrap items-center justify-between gap-3 py-3">
-                <div>
-                  <p className="text-sm font-medium text-foreground">{a.title}</p>
-                  <p className="text-xs text-muted-foreground">
-                    {a.subject} · {gradeLabel(a.gradeLevel)} · {a.timeLimitMinutes ? `${a.timeLimitMinutes} min` : "No time limit"} · {a.attemptLimit} attempt(s) · pass at {a.passingScore}%
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
+            {/* Left: Assessment List */}
+            <div className="lg:col-span-4 space-y-3">
+              {assessments.map((item) => {
+                const isSelected = item.id === selectedAssessmentId;
+                return (
+                  <button
+                    key={item.id}
+                    type="button"
+                    onClick={() => setSelectedAssessmentId(item.id)}
+                    className={`w-full text-left rounded-xl border p-4 transition-colors ${
+                      isSelected
+                        ? "bg-[#EFF6FF] border-[#1D4ED8]"
+                        : "bg-white border-[#E2E8F0] hover:border-[#93C5FD]"
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-xs font-semibold text-[#1D4ED8]">
+                        {formatGrade(item.gradeLevel)} • {item.subject}
+                      </span>
+                      <span className="text-xs font-medium text-[#475569]">
+                        Pass: {item.passingScore}%
+                      </span>
+                    </div>
+                    <div className="mt-1.5 text-sm font-semibold text-[#0F172A]">
+                      {item.title}
+                    </div>
+                    {item.timeLimitMinutes && (
+                      <div className="mt-1 text-xs text-[#64748B]">
+                        Time limit: {item.timeLimitMinutes} mins
+                      </div>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* Right: Attempt Runner / Questions + Attempt History */}
+            <div className="lg:col-span-8 space-y-5">
+              {selectedAssessment && (
+                <div className="rounded-xl bg-white border border-[#E2E8F0] p-5 space-y-4">
+                  <div className="border-b border-[#E2E8F0] pb-3.5 flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                      <div className="text-xs font-semibold uppercase tracking-wider text-[#1D4ED8]">
+                        {formatGrade(selectedAssessment.gradeLevel)} • {selectedAssessment.subject}
+                      </div>
+                      <h3 className="text-lg font-bold text-[#0F172A] mt-0.5">
+                        {selectedAssessment.title}
+                      </h3>
+                    </div>
+                    <div className="text-xs font-semibold text-[#0F172A] rounded-full bg-[#EFF6FF] px-3 py-1">
+                      Passing Score: {selectedAssessment.passingScore}%
+                    </div>
+                  </div>
+
+                  {loadingQuestions ? (
+                    <div className="text-xs text-[#64748B] py-4">Loading questions...</div>
+                  ) : questions.length === 0 ? (
+                    <div className="rounded-lg bg-[#F8FAFC] border border-[#E2E8F0] p-4 text-xs text-[#64748B]">
+                      No questions attached to this assessment yet.
+                    </div>
+                  ) : (
+                    <form onSubmit={handleSubmitAttempt} className="space-y-4">
+                      {questions.map((q, index) => (
+                        <div
+                          key={q.id}
+                          className="rounded-lg border border-[#E2E8F0] p-4 space-y-2.5"
+                        >
+                          <div className="text-sm font-semibold text-[#0F172A]">
+                            {index + 1}. {q.prompt}
+                          </div>
+
+                          {q.options && q.options.length > 0 ? (
+                            <div className="space-y-1.5">
+                              {q.options.map((opt) => (
+                                <label
+                                  key={opt}
+                                  className="flex items-center gap-2.5 text-sm text-[#334155] cursor-pointer"
+                                >
+                                  <input
+                                    type="radio"
+                                    name={`q-${q.id}`}
+                                    value={opt}
+                                    checked={answers[q.id] === opt}
+                                    onChange={() =>
+                                      setAnswers((prev) => ({ ...prev, [q.id]: opt }))
+                                    }
+                                    className="text-[#1D4ED8] focus:ring-[#1D4ED8]"
+                                  />
+                                  <span>{opt}</span>
+                                </label>
+                              ))}
+                            </div>
+                          ) : (
+                            <input
+                              type="text"
+                              value={answers[q.id] ?? ""}
+                              onChange={(e) =>
+                                setAnswers((prev) => ({ ...prev, [q.id]: e.target.value }))
+                              }
+                              placeholder="Enter your answer..."
+                              className="w-full rounded-lg border border-[#CBD5E1] px-3 py-2 text-sm"
+                            />
+                          )}
+                        </div>
+                      ))}
+
+                      {canTakeAssessment && (
+                        <div className="flex justify-end">
+                          <button
+                            type="submit"
+                            disabled={submittingAttempt}
+                            className="rounded-lg px-5 py-2.5 text-xs font-semibold text-white disabled:opacity-60"
+                            style={{ backgroundColor: DEEP_BLUE_THEME.colors.royal700 }}
+                          >
+                            {submittingAttempt ? "Submitting..." : "Submit Attempt"}
+                          </button>
+                        </div>
+                      )}
+                    </form>
+                  )}
+                </div>
+              )}
+
+              {/* Attempt History */}
+              <div className="rounded-xl bg-white border border-[#E2E8F0] p-5 space-y-3">
+                <h4 className="text-sm font-semibold text-[#0F172A]">
+                  Recorded Attempts for Selected Assessment
+                </h4>
+                {assessmentAttempts.length === 0 ? (
+                  <p className="text-xs text-[#64748B]">
+                    No attempts recorded yet for this assessment.
                   </p>
-                </div>
-                <div className="flex items-center gap-2">
-                  <StatusBadge status={a.status} />
-                  {!isStaff && studentId ? (
-                    <Button size="sm" variant="outline" onClick={() => setTaking(a.id)}>Take</Button>
-                  ) : null}
-                </div>
-              </li>
-            ))}
-          </ul>
+                ) : (
+                  <div className="divide-y divide-[#E2E8F0] border border-[#E2E8F0] rounded-lg overflow-hidden">
+                    {assessmentAttempts.map((att) => (
+                      <div
+                        key={att.id}
+                        className="p-3 flex items-center justify-between gap-3 text-xs"
+                      >
+                        <div>
+                          <span className="font-semibold text-[#0F172A]">
+                            Score: {att.scorePercent}%
+                          </span>
+                          {att.submittedAt && (
+                            <span className="text-[#64748B] ml-2">
+                              • {new Date(att.submittedAt).toLocaleDateString()}
+                            </span>
+                          )}
+                        </div>
+                        <span
+                          className={`rounded-full px-2.5 py-0.5 font-semibold ${
+                            att.passed
+                              ? "bg-[#DCFCE7] text-[#166534]"
+                              : "bg-[#FEF3C7] text-[#92400E]"
+                          }`}
+                        >
+                          {att.passed ? "Passed" : "Needs Practice"}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
         )}
-      </Section>
-
-      <Section title="Attempts and scores" className="mt-6">
-        {(attempts.data ?? []).length === 0 ? (
-          <EmptyState title="No attempts yet" />
-        ) : (
-          <ul className="divide-y divide-border">
-            {(attempts.data ?? []).map((a) => (
-              <li key={a.id} className="flex flex-wrap items-center justify-between gap-3 py-3 text-sm">
-                <span className="text-foreground">{titleOf.get(a.assessmentId) ?? "Assessment"} · attempt {a.attemptNumber}</span>
-                <span className="flex items-center gap-3">
-                  {a.status === "graded" ? <span className="font-semibold tabular-nums">{a.percent}%</span> : null}
-                  <StatusBadge status={a.status === "graded" ? (a.passed ? "passed" : "rejected") : a.status} />
-                </span>
-              </li>
-            ))}
-          </ul>
-        )}
-      </Section>
-    </>
+      </div>
+    </Layout>
   );
 }

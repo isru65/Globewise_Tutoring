@@ -1,3 +1,5 @@
+//schema.ts
+
 import {
   boolean,
   date,
@@ -10,6 +12,7 @@ import {
 } from "drizzle-orm/pg-core";
 
 const id = () => text("id").primaryKey();
+const uuidCol = (name: string) => text(name).notNull().default(crypto.randomUUID());
 const tsz = (name: string) => timestamp(name, { withTimezone: true, mode: "string" });
 const createdAt = () => tsz("created_at").notNull().defaultNow();
 
@@ -20,6 +23,60 @@ export const appUsers = pgTable("app_users", {
   role: text("role").notNull().default("parent"),
   status: text("status").notNull().default("active"),
   createdAt: createdAt(),
+});
+
+export const roles = pgTable("roles", {
+  id: id(),
+  slug: text("slug").notNull().unique(), // 'student' | 'tutor' | 'parent' | 'admin'
+  name: text("name").notNull(),
+  description: text("description").notNull().default(""),
+  createdAt: createdAt(),
+});
+
+export const userRoles = pgTable(
+  "user_roles",
+  {
+    id: id(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => appUsers.id, { onDelete: "cascade" }),
+    roleSlug: text("role_slug")
+      .notNull()
+      .references(() => roles.slug, { onDelete: "cascade" }),
+    isPrimary: boolean("is_primary").notNull().default(false),
+    assignedByEmail: text("assigned_by_email"),
+    createdAt: createdAt(),
+  },
+  (t) => [unique("user_roles_user_role_unique").on(t.userId, t.roleSlug)],
+);
+
+export const parentProfiles = pgTable("parent_profiles", {
+  id: id(),
+  userId: text("user_id")
+    .notNull()
+    .unique()
+    .references(() => appUsers.id, { onDelete: "cascade" }),
+  phone: text("phone").notNull().default(""),
+  timezone: text("timezone").notNull().default("America/New_York"),
+  consentAcceptedAt: tsz("consent_accepted_at"),
+  createdAt: createdAt(),
+  updatedAt: tsz("updated_at").notNull().defaultNow(),
+});
+
+export const tutorProfiles = pgTable("tutor_profiles", {
+  id: id(),
+  userId: text("user_id")
+    .notNull()
+    .unique()
+    .references(() => appUsers.id, { onDelete: "cascade" }),
+  bio: text("bio").notNull().default(""),
+  subjects: jsonb("subjects").$type<string[]>().notNull().default([]),
+  gradeLevels: jsonb("grade_levels").$type<number[]>().notNull().default([]),
+  timezone: text("timezone").notNull().default("America/New_York"),
+  approvedAt: tsz("approved_at"),
+  approvedByEmail: text("approved_by_email"),
+  createdAt: createdAt(),
+  updatedAt: tsz("updated_at").notNull().defaultNow(),
 });
 
 export const students = pgTable("students", {
@@ -33,6 +90,41 @@ export const students = pgTable("students", {
   studentEmail: text("student_email"),
   createdAt: createdAt(),
 });
+
+export const studentProfiles = pgTable("student_profiles", {
+  id: id(),
+  studentId: text("student_id")
+    .notNull()
+    .unique()
+    .references(() => students.id, { onDelete: "cascade" }),
+  userId: text("user_id").references(() => appUsers.id, { onDelete: "set null" }),
+  schoolName: text("school_name").notNull().default(""),
+  stateCode: text("state_code").notNull().default(""),
+  currentLevel: integer("current_level").notNull().default(1),
+  totalPoints: integer("total_points").notNull().default(0),
+  createdAt: createdAt(),
+  updatedAt: tsz("updated_at").notNull().defaultNow(),
+});
+
+export const parentStudentRelationships = pgTable(
+  "parent_student_relationships",
+  {
+    id: id(),
+    parentUserId: text("parent_user_id")
+      .notNull()
+      .references(() => appUsers.id, { onDelete: "cascade" }),
+    parentEmail: text("parent_email").notNull(),
+    studentId: text("student_id")
+      .notNull()
+      .references(() => students.id, { onDelete: "cascade" }),
+    relationshipType: text("relationship_type").notNull().default("guardian"),
+    verified: boolean("verified").notNull().default(true),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    unique("parent_student_unique").on(t.parentUserId, t.studentId),
+  ],
+);
 
 export const curriculumTopics = pgTable("curriculum_topics", {
   id: id(),
@@ -165,6 +257,9 @@ export const assessmentQuestions = pgTable("assessment_questions", {
   assessmentId: text("assessment_id")
     .notNull()
     .references(() => assessments.id, { onDelete: "cascade" }),
+  topicId: text("topic_id").references(() => curriculumTopics.id, {
+    onDelete: "set null",
+  }),
   questionType: text("question_type").notNull(),
   prompt: text("prompt").notNull(),
   options: jsonb("options").$type<string[]>(),
@@ -206,7 +301,13 @@ export const tutoringSessions = pgTable("tutoring_sessions", {
   meetingUrl: text("meeting_url").notNull(),
   status: text("status").notNull().default("scheduled"),
   attendance: text("attendance"),
+  sessionPrepared: boolean("session_prepared").notNull().default(false),
+  tutorReady: boolean("tutor_ready").notNull().default(false),
+  tutorJoined: boolean("tutor_joined").notNull().default(false),
+  studentJoined: boolean("student_joined").notNull().default(false),
+  isActive: boolean("is_active").notNull().default(true),
   createdAt: createdAt(),
+  updatedAt: tsz("updated_at").notNull().defaultNow(),
 });
 
 export const sessionNotes = pgTable("session_notes", {
@@ -238,6 +339,18 @@ export const badges = pgTable("badges", {
   pointsRequired: integer("points_required").notNull(),
 });
 
+export const studentStreaks = pgTable("student_streaks", {
+  id: id(),
+  studentId: text("student_id")
+    .notNull()
+    .unique()
+    .references(() => students.id, { onDelete: "cascade" }),
+  currentStreakDays: integer("current_streak_days").notNull().default(0),
+  longestStreakDays: integer("longest_streak_days").notNull().default(0),
+  lastActiveDate: date("last_active_date", { mode: "string" }),
+  updatedAt: tsz("updated_at").notNull().defaultNow(),
+});
+
 export const subscriptionPlans = pgTable("subscription_plans", {
   id: id(),
   name: text("name").notNull(),
@@ -261,6 +374,20 @@ export const subscriptions = pgTable("subscriptions", {
   createdAt: createdAt(),
 });
 
+export const payments = pgTable("payments", {
+  id: id(),
+  subscriptionId: text("subscription_id").references(() => subscriptions.id, {
+    onDelete: "set null",
+  }),
+  parentEmail: text("parent_email").notNull(),
+  amountCents: integer("amount_cents").notNull(),
+  currency: text("currency").notNull().default("USD"),
+  status: text("status").notNull().default("pending"),
+  provider: text("provider").notNull().default("stripe"),
+  providerRef: text("provider_ref").notNull().default(""),
+  createdAt: createdAt(),
+});
+
 export const notifications = pgTable("app_notifications", {
   id: id(),
   recipientEmail: text("recipient_email").notNull(),
@@ -280,3 +407,5 @@ export const auditLogs = pgTable("audit_logs", {
   after: jsonb("after").$type<Record<string, unknown> | null>(),
   createdAt: createdAt(),
 });
+
+export { uuidCol };

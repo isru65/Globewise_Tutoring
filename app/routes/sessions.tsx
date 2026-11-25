@@ -1,409 +1,766 @@
-import { useActionMutation, useActionQuery } from "@agent-native/core/client/hooks";
-import { useState, type FormEvent } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "react-router";
+import Layout from "../components/layout/Layout.js";
+import { DEEP_BLUE_THEME } from "../design-system.js";
+import useCurrentUser from "../hooks/use-current-user.js";
 
-import { EmptyState, ErrorNote, FieldLabel, PageHeader, Section, StatCard, StatusBadge, fieldClass } from "@/components/app/primitives";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { useCurrentUser } from "@/hooks/use-current-user";
-import { useNow } from "@/hooks/use-now";
-import { TIMEZONES, errorText, formatDateTime, gradeLabel, label } from "@/lib/globewise";
-import { cn } from "@/lib/utils";
-import {
-  SESSION_FILTERS,
-  dashboardStats,
-  dateKey,
-  matchesFilter,
-  readiness,
-  sortForFilter,
-  type Readiness,
-  type SessionFilter,
-} from "@/lib/session-schedule";
-
-export function meta() {
-  return [{ title: "Sessions · Globewise Tutoring" }];
-}
-
-const SESSION_STATUSES = ["scheduled", "confirmed", "in_progress", "completed", "cancelled", "no_show", "rescheduled"] as const;
-const ATTENDANCE = ["present", "late", "absent"] as const;
-
-type StudentOption = { id: string; firstName: string; lastName: string; timezone: string; gradeLevel: number };
-type Session = {
+export interface TutoringSessionRecord {
   id: string;
   studentId: string;
   tutorEmail: string;
-  subject: string;
-  topic: string;
-  startsAt: string;
-  endsAt: string;
-  timezone: string;
-  meetingUrl: string;
+  scheduledAt: string;
+  durationMinutes: number;
   status: string;
-  attendance: string | null;
-};
-
-const EMPTY_FORM = { studentId: "", subject: "Mathematics", topic: "", startsAt: "", endsAt: "", timezone: "America/New_York", meetingUrl: "" };
-
-function ScheduleForm({ students }: { students: StudentOption[] }) {
-  const create = useActionMutation("create-session");
-  const [form, setForm] = useState({ ...EMPTY_FORM, studentId: students[0]?.id ?? "", timezone: students[0]?.timezone ?? EMPTY_FORM.timezone });
-
-  function set<K extends keyof typeof form>(key: K, value: (typeof form)[K]) {
-    setForm((f) => ({ ...f, [key]: value }));
-  }
-
-  function pickStudent(studentId: string) {
-    const student = students.find((s) => s.id === studentId);
-    setForm((f) => ({ ...f, studentId, timezone: student?.timezone ?? f.timezone }));
-  }
-
-  function submit(event: FormEvent) {
-    event.preventDefault();
-    create.mutate(
-      {
-        studentId: form.studentId,
-        subject: form.subject.trim(),
-        topic: form.topic.trim(),
-        startsAt: new Date(form.startsAt).toISOString(),
-        endsAt: new Date(form.endsAt).toISOString(),
-        timezone: form.timezone,
-        meetingUrl: form.meetingUrl.trim(),
-      },
-      { onSuccess: () => setForm((f) => ({ ...f, topic: "", startsAt: "", endsAt: "", meetingUrl: "" })) },
-    );
-  }
-
-  return (
-    <Section title="Schedule a session" description="Paste a Zoom or Google Meet link. Times are checked for overlaps before saving.">
-      <form onSubmit={submit} className="grid gap-4 md:grid-cols-3">
-        <label className="block">
-          <FieldLabel>Student</FieldLabel>
-          <select required className={fieldClass} value={form.studentId} onChange={(e) => pickStudent(e.target.value)}>
-            {students.map((s) => <option key={s.id} value={s.id}>{s.firstName} {s.lastName}</option>)}
-          </select>
-        </label>
-        <label className="block">
-          <FieldLabel>Subject</FieldLabel>
-          <Input required value={form.subject} onChange={(e) => set("subject", e.target.value)} />
-        </label>
-        <label className="block">
-          <FieldLabel>Topic</FieldLabel>
-          <Input value={form.topic} onChange={(e) => set("topic", e.target.value)} />
-        </label>
-        <label className="block">
-          <FieldLabel>Start</FieldLabel>
-          <Input required type="datetime-local" value={form.startsAt} onChange={(e) => set("startsAt", e.target.value)} />
-        </label>
-        <label className="block">
-          <FieldLabel>End</FieldLabel>
-          <Input required type="datetime-local" value={form.endsAt} onChange={(e) => set("endsAt", e.target.value)} />
-        </label>
-        <label className="block">
-          <FieldLabel>Time zone</FieldLabel>
-          <select className={fieldClass} value={form.timezone} onChange={(e) => set("timezone", e.target.value)}>
-            {TIMEZONES.map((tz) => <option key={tz} value={tz}>{tz}</option>)}
-          </select>
-        </label>
-        <label className="block md:col-span-2">
-          <FieldLabel>Meeting link (Zoom or Google Meet)</FieldLabel>
-          <Input required type="url" placeholder="https://meet.google.com/abc-defg-hij" value={form.meetingUrl} onChange={(e) => set("meetingUrl", e.target.value)} />
-        </label>
-        <div className="flex items-end justify-end gap-3 md:col-span-1">
-          <Button type="submit" disabled={create.isPending || !form.studentId}>Schedule session</Button>
-        </div>
-        <div className="md:col-span-3">
-          <ErrorNote error={create.error ? new Error(errorText(create.error)) : null} />
-        </div>
-      </form>
-    </Section>
-  );
+  meetingLink?: string | null;
+  topicSummary?: string | null;
 }
 
-function NotesPanel({ sessionId }: { sessionId: string }) {
-  const notes = useActionQuery("list-session-notes", { sessionId });
-  const add = useActionMutation("add-session-note");
-  const [body, setBody] = useState("");
-  const [parentVisible, setParentVisible] = useState(false);
+export interface SessionNoteRecord {
+  id: string;
+  sessionId: string;
+  authorEmail: string;
+  noteText: string;
+  createdAt?: string;
+}
 
-  function save(event: FormEvent) {
-    event.preventDefault();
-    add.mutate(
-      { sessionId, body, parentVisible },
-      { onSuccess: () => { setBody(""); setParentVisible(false); } },
-    );
+interface StudentSummary {
+  id: string;
+  firstName: string;
+  lastName: string;
+  gradeLevel: number;
+  tutorEmail?: string | null;
+}
+
+function formatGrade(grade: number): string {
+  return grade === 0 ? "Kindergarten (K)" : `Grade ${grade}`;
+}
+
+function getSessionStatusBadge(status: string): string {
+  switch (status) {
+    case "completed":
+      return "bg-[#DCFCE7] text-[#166534]";
+    case "cancelled":
+    case "no_show":
+      return "bg-[#FEE2E2] text-[#991B1B]";
+    case "in_progress":
+      return "bg-[#E0F2FE] text-[#075985]";
+    default:
+      return "bg-[#FEF3C7] text-[#92400E]";
   }
-
-  return (
-    <div className="space-y-4 rounded-md bg-muted/40 p-4">
-      {(notes.data ?? []).length === 0 ? (
-        <p className="text-sm text-muted-foreground">No notes yet.</p>
-      ) : (
-        <ul className="space-y-2">
-          {(notes.data ?? []).map((note) => (
-            <li key={note.id} className="text-sm">
-              <p className="whitespace-pre-wrap text-foreground">{note.body}</p>
-              <p className="text-xs text-muted-foreground">
-                {note.parentVisible ? "Visible to parent" : "Private to tutors"} · {formatDateTime(note.createdAt)}
-              </p>
-            </li>
-          ))}
-        </ul>
-      )}
-      <form onSubmit={save} className="space-y-2">
-        <textarea
-          aria-label="New session note"
-          required
-          maxLength={5000}
-          rows={3}
-          value={body}
-          onChange={(e) => setBody(e.target.value)}
-          className="w-full rounded-md border border-input bg-background p-3 text-sm text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring/30"
-        />
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <label className="flex items-center gap-2 text-sm text-muted-foreground">
-            <input type="checkbox" checked={parentVisible} onChange={(e) => setParentVisible(e.target.checked)} />
-            Share with parent
-          </label>
-          <Button type="submit" size="sm" disabled={add.isPending || !body.trim()}>Add note</Button>
-        </div>
-        <ErrorNote error={add.error ? new Error(errorText(add.error)) : null} />
-      </form>
-    </div>
-  );
 }
 
-function RescheduleForm({ session, onDone }: { session: Session; onDone: () => void }) {
-  const update = useActionMutation("update-session");
-  const [times, setTimes] = useState({ startsAt: "", endsAt: "" });
-
-  function save(event: FormEvent) {
-    event.preventDefault();
-    update.mutate(
-      {
-        id: session.id,
-        startsAt: new Date(times.startsAt).toISOString(),
-        endsAt: new Date(times.endsAt).toISOString(),
-      },
-      { onSuccess: onDone },
-    );
-  }
-
-  return (
-    <form onSubmit={save} className="grid gap-3 rounded-md bg-muted/40 p-4 md:grid-cols-[1fr_1fr_auto] md:items-end">
-      <label className="block">
-        <FieldLabel>New start</FieldLabel>
-        <Input required type="datetime-local" value={times.startsAt} onChange={(e) => setTimes({ ...times, startsAt: e.target.value })} />
-      </label>
-      <label className="block">
-        <FieldLabel>New end</FieldLabel>
-        <Input required type="datetime-local" value={times.endsAt} onChange={(e) => setTimes({ ...times, endsAt: e.target.value })} />
-      </label>
-      <div className="flex items-center gap-2">
-        <Button type="submit" size="sm" disabled={update.isPending}>Save new time</Button>
-        <Button type="button" size="sm" variant="ghost" onClick={onDone}>Cancel</Button>
-      </div>
-      <div className="md:col-span-3">
-        <ErrorNote error={update.error ? new Error(errorText(update.error)) : null} />
-      </div>
-    </form>
-  );
-}
-
-function ReadinessChip({ state }: { state: Readiness }) {
-  const text = state.kind === "live" ? "Live now" : state.kind === "soon" ? `Starts in ${state.minutes} min` : "Update status";
-  const tone =
-    state.kind === "live"
-      ? "bg-primary/10 text-primary ring-primary/20"
-      : state.kind === "soon"
-        ? "bg-amber-500/10 text-amber-800 ring-amber-600/20 dark:text-amber-300"
-        : "bg-red-500/10 text-red-700 ring-red-600/20 dark:text-red-300";
-  return (
-    <span className={cn("inline-flex items-center rounded-md px-2 py-0.5 text-xs font-medium ring-1 ring-inset", tone)}>
-      {text}
-    </span>
-  );
-}
-
-type StudentSummary = { name: string; gradeLevel: number };
-
-function SessionItem({ session, student, isStaff, now }: { session: Session; student: StudentSummary | undefined; isStaff: boolean; now: Date }) {
-  const update = useActionMutation("update-session");
-  const [panel, setPanel] = useState<"none" | "notes" | "reschedule">("none");
-  const state = readiness(session, now);
-
-  return (
-    <li className="space-y-3 py-4">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="min-w-0">
-          <p className="text-sm font-medium text-foreground">
-            {session.subject}
-            {session.topic ? ` · ${session.topic}` : ""}
-          </p>
-          <p className="text-xs text-muted-foreground">
-            {student ? `${student.name} · ${gradeLabel(student.gradeLevel)}` : "Student"} · {formatDateTime(session.startsAt, session.timezone)} to {formatDateTime(session.endsAt, session.timezone)} ({session.timezone})
-          </p>
-        </div>
-        <div className="flex flex-wrap items-center gap-3">
-          {state ? <ReadinessChip state={state} /> : null}
-          <StatusBadge status={session.status} />
-          {session.attendance ? <StatusBadge status={session.attendance} /> : null}
-          <a
-            href={session.meetingUrl}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="text-sm font-medium text-primary underline-offset-4 hover:underline"
-          >
-            Join meeting
-          </a>
-        </div>
-      </div>
-
-      {isStaff ? (
-        <div className="flex flex-wrap items-center gap-2">
-          {state?.kind === "needs_update" ? (
-            <Button size="sm" disabled={update.isPending} onClick={() => update.mutate({ id: session.id, status: "completed" })}>
-              Mark completed
-            </Button>
-          ) : null}
-          <select
-            aria-label="Session status"
-            className={`${fieldClass} w-auto`}
-            value={session.status}
-            disabled={update.isPending}
-            onChange={(e) => update.mutate({ id: session.id, status: e.target.value as (typeof SESSION_STATUSES)[number] })}
-          >
-            {SESSION_STATUSES.map((s) => <option key={s} value={s}>{label(s)}</option>)}
-          </select>
-          <select
-            aria-label="Attendance"
-            className={`${fieldClass} w-auto`}
-            value={session.attendance ?? ""}
-            disabled={update.isPending}
-            onChange={(e) => update.mutate({ id: session.id, attendance: e.target.value ? (e.target.value as (typeof ATTENDANCE)[number]) : null })}
-          >
-            <option value="">Attendance not marked</option>
-            {ATTENDANCE.map((a) => <option key={a} value={a}>{label(a)}</option>)}
-          </select>
-          <Button size="sm" variant="outline" onClick={() => setPanel(panel === "reschedule" ? "none" : "reschedule")}>Reschedule</Button>
-          <Button size="sm" variant="outline" onClick={() => setPanel(panel === "notes" ? "none" : "notes")}>Notes</Button>
-        </div>
-      ) : null}
-
-      <ErrorNote error={update.error ? new Error(errorText(update.error)) : null} />
-      {panel === "reschedule" ? <RescheduleForm session={session} onDone={() => setPanel("none")} /> : null}
-      {panel === "notes" ? <NotesPanel sessionId={session.id} /> : null}
-    </li>
-  );
-}
-
-function groupByDay<T extends { startsAt: string }>(items: T[]) {
-  const groups: { key: string; label: string; items: T[] }[] = [];
-  for (const item of items) {
-    const date = new Date(item.startsAt);
-    const key = dateKey(date);
-    const last = groups[groups.length - 1];
-    if (last?.key === key) {
-      last.items.push(item);
-    } else {
-      groups.push({
-        key,
-        label: date.toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" }),
-        items: [item],
-      });
-    }
-  }
-  return groups;
+function getDefaultScheduledInput(): string {
+  const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000);
+  tomorrow.setMinutes(0, 0, 0);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${tomorrow.getFullYear()}-${pad(tomorrow.getMonth() + 1)}-${pad(
+    tomorrow.getDate(),
+  )}T${pad(tomorrow.getHours())}:00`;
 }
 
 export default function SessionsRoute() {
-  const { user } = useCurrentUser();
-  const isStaff = user?.role === "tutor" || user?.role === "admin";
-  const students = useActionQuery("list-students", {});
-  const sessions = useActionQuery("list-sessions", {});
-  const now = useNow();
-  const [filter, setFilter] = useState<SessionFilter>("upcoming");
+  const { user, loading: userLoading, refresh: refreshUser } = useCurrentUser();
+  const [searchParams, setSearchParams] = useSearchParams();
 
-  const allSessions = (sessions.data ?? []) as Session[];
-  const studentById = new Map(
-    (students.data ?? []).map((s) => [s.id, { name: `${s.firstName} ${s.lastName}`, gradeLevel: s.gradeLevel }]),
+  const initialStudentId = searchParams.get("studentId") || "";
+
+  const [students, setStudents] = useState<StudentSummary[]>([]);
+  const [selectedStudentId, setSelectedStudentId] = useState<string>(initialStudentId);
+  const [sessions, setSessions] = useState<TutoringSessionRecord[]>([]);
+  const [selectedSessionId, setSelectedSessionId] = useState<string>("");
+  const [notes, setNotes] = useState<SessionNoteRecord[]>([]);
+
+  const [loadingSessions, setLoadingSessions] = useState<boolean>(true);
+  const [loadingNotes, setLoadingNotes] = useState<boolean>(false);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  // Schedule session form (Tutor / Admin)
+  const [showScheduleForm, setShowScheduleForm] = useState<boolean>(false);
+  const [scheduling, setScheduling] = useState<boolean>(false);
+  const [scheduleForm, setScheduleForm] = useState({
+    studentId: initialStudentId,
+    scheduledAt: getDefaultScheduledInput(),
+    durationMinutes: 45,
+    topicSummary: "",
+    meetingLink: "",
+  });
+
+  // Session note form (Tutor / Admin)
+  const [newNoteText, setNewNoteText] = useState<string>("");
+  const [savingNote, setSavingNote] = useState<boolean>(false);
+
+  const canManageSessions = user?.role === "tutor" || user?.role === "admin";
+
+  const loadStudents = useCallback(async () => {
+    try {
+      const res = await fetch("/api/v1/me?page=1&page_size=100", {
+        credentials: "include",
+        headers: { Accept: "application/json" },
+      });
+      if (!res.ok) return;
+      const payload = await res.json();
+      const list: StudentSummary[] = Array.isArray(payload?.data?.accessibleStudents?.data)
+        ? payload.data.accessibleStudents.data
+        : [];
+      setStudents(list);
+      const firstStudent = list[0];
+      if (!selectedStudentId && firstStudent && user?.role !== "admin") {
+        setSelectedStudentId(firstStudent.id);
+        setScheduleForm((prev) => ({ ...prev, studentId: firstStudent.id }));
+      }
+    } catch {
+      // Non-blocking fallback
+    }
+  }, [selectedStudentId, user?.role]);
+
+  const loadSessions = useCallback(async () => {
+    setLoadingSessions(true);
+    setError(null);
+    try {
+      const qs = new URLSearchParams();
+      if (selectedStudentId) qs.set("studentId", selectedStudentId);
+
+      const url = `/api/v1/sessions${qs.toString() ? `?${qs.toString()}` : ""}`;
+      const res = await fetch(url, {
+        credentials: "include",
+        headers: { Accept: "application/json" },
+      });
+
+      if (res.status === 404) {
+        setSessions([]);
+        setLoadingSessions(false);
+        return;
+      }
+
+      if (!res.ok) {
+        throw new Error(`Unable to load tutoring sessions (${res.status})`);
+      }
+
+      const payload = await res.json();
+      const list: TutoringSessionRecord[] = Array.isArray(payload?.data)
+        ? payload.data
+        : Array.isArray(payload?.data?.items)
+          ? payload.data.items
+          : [];
+
+      const sorted = [...list].sort(
+        (a, b) => new Date(b.scheduledAt).getTime() - new Date(a.scheduledAt).getTime(),
+      );
+      setSessions(sorted);
+
+      const firstSession = sorted[0];
+      if (firstSession) {
+        const exists = sorted.some((s) => s.id === selectedSessionId);
+        if (!exists) {
+          setSelectedSessionId(firstSession.id);
+        }
+      } else {
+        setSelectedSessionId("");
+        setNotes([]);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load sessions");
+    } finally {
+      setLoadingSessions(false);
+    }
+  }, [selectedStudentId, selectedSessionId]);
+
+  const loadSessionNotes = useCallback(async (sessionId: string) => {
+    if (!sessionId) {
+      setNotes([]);
+      return;
+    }
+    setLoadingNotes(true);
+    try {
+      const res = await fetch(
+        `/api/v1/sessions/${encodeURIComponent(sessionId)}/notes`,
+        {
+          credentials: "include",
+          headers: { Accept: "application/json" },
+        },
+      );
+      if (!res.ok) {
+        setNotes([]);
+        setLoadingNotes(false);
+        return;
+      }
+      const payload = await res.json();
+      const list: SessionNoteRecord[] = Array.isArray(payload?.data)
+        ? payload.data
+        : Array.isArray(payload?.data?.items)
+          ? payload.data.items
+          : [];
+      setNotes(list);
+    } catch {
+      setNotes([]);
+    } finally {
+      setLoadingNotes(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!userLoading) {
+      void loadStudents();
+      void loadSessions();
+    }
+  }, [userLoading, loadStudents, loadSessions]);
+
+  useEffect(() => {
+    void loadSessionNotes(selectedSessionId);
+  }, [selectedSessionId, loadSessionNotes]);
+
+  const studentMap = useMemo(() => {
+    const map = new Map<string, StudentSummary>();
+    for (const s of students) {
+      map.set(s.id, s);
+    }
+    return map;
+  }, [students]);
+
+  const selectedSession = useMemo(
+    () => sessions.find((s) => s.id === selectedSessionId) ?? null,
+    [sessions, selectedSessionId],
   );
-  const activeFilter: SessionFilter = isStaff ? filter : "all";
-  const visible = sortForFilter(activeFilter, allSessions.filter((s) => matchesFilter(s, activeFilter, now)));
-  const groups = groupByDay(visible);
-  const stats = dashboardStats(allSessions, now);
+
+  function handleStudentFilterChange(nextStudentId: string) {
+    setSelectedStudentId(nextStudentId);
+    setScheduleForm((prev) => ({ ...prev, studentId: nextStudentId || prev.studentId }));
+    const nextParams = new URLSearchParams(searchParams);
+    if (nextStudentId) {
+      nextParams.set("studentId", nextStudentId);
+    } else {
+      nextParams.delete("studentId");
+    }
+    setSearchParams(nextParams, { replace: true });
+  }
+
+  async function handleScheduleSession(e: React.FormEvent) {
+    e.preventDefault();
+    if (!canManageSessions) return;
+    const targetStudentId = scheduleForm.studentId || selectedStudentId;
+    if (!targetStudentId || !scheduleForm.scheduledAt) {
+      setError("Please select a student and session date/time.");
+      return;
+    }
+
+    setScheduling(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const res = await fetch("/api/v1/sessions", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          studentId: targetStudentId,
+          scheduledAt: new Date(scheduleForm.scheduledAt).toISOString(),
+          durationMinutes: Number(scheduleForm.durationMinutes) || 45,
+          topicSummary: scheduleForm.topicSummary.trim() || null,
+          meetingLink: scheduleForm.meetingLink.trim() || null,
+        }),
+      });
+
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(payload?.error?.message || `Failed to schedule session (${res.status})`);
+      }
+
+      setScheduleForm((prev) => ({
+        ...prev,
+        topicSummary: "",
+        meetingLink: "",
+      }));
+      setShowScheduleForm(false);
+      setNotice("1-on-1 tutoring session scheduled.");
+      await loadSessions();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not schedule session");
+    } finally {
+      setScheduling(false);
+    }
+  }
+
+  async function handleUpdateSessionStatus(sessionId: string, nextStatus: string) {
+    if (!canManageSessions) return;
+    setError(null);
+    setNotice(null);
+    try {
+      const res = await fetch(`/api/v1/sessions/${encodeURIComponent(sessionId)}`, {
+        method: "PATCH",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status: nextStatus }),
+      });
+
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(payload?.error?.message || `Status update failed (${res.status})`);
+      }
+
+      setNotice(`Session status updated to ${nextStatus}.`);
+      await loadSessions();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not update session status");
+    }
+  }
+
+  async function handleAddNote(e: React.FormEvent) {
+    e.preventDefault();
+    if (!canManageSessions || !selectedSessionId || !newNoteText.trim()) return;
+
+    setSavingNote(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const res = await fetch(
+        `/api/v1/sessions/${encodeURIComponent(selectedSessionId)}/notes`,
+        {
+          method: "POST",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ noteText: newNoteText.trim() }),
+        },
+      );
+
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(payload?.error?.message || `Failed to save note (${res.status})`);
+      }
+
+      setNewNoteText("");
+      setNotice("Session note recorded.");
+      await loadSessionNotes(selectedSessionId);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not add session note");
+    } finally {
+      setSavingNote(false);
+    }
+  }
+
+  if (userLoading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-[#0F172A] text-white text-sm">
+        Loading tutoring sessions...
+      </div>
+    );
+  }
 
   return (
-    <>
-      <PageHeader
-        title={isStaff ? "Session dashboard" : "My schedule"}
-        description={
-          isStaff
-            ? "Today's sessions, sessions that still need a status, and what is coming up. Conflicts are blocked before a session is saved."
-            : "Your tutoring sessions with Zoom or Google Meet links."
-        }
-      />
-
-      {isStaff ? (
-        <>
-          <div className="mb-6 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-            <StatCard label="Today" value={stats.today} hint="Sessions starting today" />
-            <StatCard label="Next 7 days" value={stats.nextSevenDays} hint="Active sessions" />
-            <StatCard label="Needs update" value={stats.needsUpdate} hint="Ended without a status" />
-            <StatCard label="Completed this week" value={stats.completedThisWeek} hint="Since Monday" />
+    <Layout
+      title="Tutoring Sessions & Notes"
+      breadcrumbs={[
+        { label: "Home", to: "/" },
+        { label: "Sessions" },
+      ]}
+      currentUser={user}
+      onSignOut={() => {
+        void refreshUser();
+      }}
+      headerActions={
+        canManageSessions ? (
+          <button
+            type="button"
+            onClick={() => setShowScheduleForm((prev) => !prev)}
+            className="rounded-lg px-3.5 py-2 text-xs sm:text-sm font-semibold text-white transition-colors"
+            style={{ backgroundColor: DEEP_BLUE_THEME.colors.royal700 }}
+          >
+            {showScheduleForm ? "Close Scheduler" : "+ Schedule Session"}
+          </button>
+        ) : undefined
+      }
+    >
+      <div className="space-y-6">
+        {/* Deep Blue / Navy Header Banner */}
+        <div
+          className="rounded-xl p-5 sm:p-6 text-white"
+          style={{
+            background: `linear-gradient(120deg, ${DEEP_BLUE_THEME.colors.navy900} 0%, ${DEEP_BLUE_THEME.colors.navy800} 100%)`,
+          }}
+        >
+          <div className="text-xs font-semibold uppercase tracking-wider text-sky-300">
+            1-on-1 Live Instruction & Session Logs
           </div>
-          {(students.data ?? []).length > 0 ? (
-            <div className="mb-6">
-              <ScheduleForm students={students.data ?? []} />
-            </div>
-          ) : null}
-        </>
-      ) : null}
+          <h2 className="mt-1 text-xl font-bold">
+            Tutoring Schedule, Attendance & Session Notes
+          </h2>
+          <p className="mt-1 text-sm text-blue-100/90 max-w-2xl">
+            Schedule live 1-on-1 sessions, launch meeting links, mark attendance/completion, and
+            share structured session notes across students, tutors, and parents.
+          </p>
+        </div>
 
-      <Section title="Sessions" description="Times are shown in each session's time zone.">
-        {isStaff ? (
-          <div role="group" aria-label="Filter sessions" className="mb-5 flex flex-wrap gap-2">
-            {SESSION_FILTERS.map((f) => {
-              const count = allSessions.filter((s) => matchesFilter(s, f.id, now)).length;
-              return (
-                <Button
-                  key={f.id}
-                  size="sm"
-                  variant={filter === f.id ? "default" : "outline"}
-                  aria-pressed={filter === f.id}
-                  onClick={() => setFilter(f.id)}
-                >
-                  {f.label} <span className="tabular-nums opacity-80">({count})</span>
-                </Button>
-              );
-            })}
-          </div>
-        ) : null}
-
-        {visible.length === 0 ? (
-          <EmptyState
-            title={isStaff ? "No sessions in this view" : "No sessions scheduled"}
-            description={isStaff ? "Choose another filter, or schedule a session above." : "Your tutor will add sessions here."}
-          />
-        ) : (
-          <div className="space-y-6">
-            {groups.map((group) => (
-              <div key={group.key}>
-                <h3 className="mb-1 text-xs font-medium uppercase tracking-wide text-muted-foreground">{group.label}</h3>
-                <ul className="divide-y divide-border">
-                  {group.items.map((session) => (
-                    <SessionItem
-                      key={session.id}
-                      session={session}
-                      student={studentById.get(session.studentId)}
-                      isStaff={isStaff}
-                      now={now}
-                    />
-                  ))}
-                </ul>
-              </div>
-            ))}
+        {notice && (
+          <div className="rounded-lg bg-[#DCFCE7] border border-[#BBF7D0] text-[#166534] px-4 py-2.5 text-xs font-medium">
+            {notice}
           </div>
         )}
-      </Section>
-    </>
+
+        {error && (
+          <div className="rounded-lg bg-[#FEE2E2] border border-[#FECACA] text-[#991B1B] px-4 py-2.5 text-xs font-medium flex items-center justify-between gap-4">
+            <span>{error}</span>
+            <button
+              type="button"
+              onClick={() => setError(null)}
+              className="underline font-semibold"
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
+
+        {/* Schedule Session Form (Tutors & Admins) */}
+        {canManageSessions && showScheduleForm && (
+          <form
+            onSubmit={handleScheduleSession}
+            className="rounded-xl bg-white border border-[#CBD5E1] p-5 space-y-4 shadow-xs"
+          >
+            <h3 className="text-base font-semibold text-[#0F172A]">
+              Schedule 1-on-1 Tutoring Session
+            </h3>
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div>
+                <label className="block text-xs font-medium text-[#475569] mb-1">
+                  Student
+                </label>
+                {students.length > 0 ? (
+                  <select
+                    value={scheduleForm.studentId}
+                    onChange={(e) =>
+                      setScheduleForm((p) => ({ ...p, studentId: e.target.value }))
+                    }
+                    className="w-full rounded-lg border border-[#CBD5E1] px-3 py-2 text-sm bg-white"
+                  >
+                    {students.map((s) => (
+                      <option key={s.id} value={s.id}>
+                        {s.firstName} {s.lastName}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <input
+                    type="text"
+                    required
+                    value={scheduleForm.studentId}
+                    onChange={(e) =>
+                      setScheduleForm((p) => ({ ...p, studentId: e.target.value }))
+                    }
+                    placeholder="Student ID"
+                    className="w-full rounded-lg border border-[#CBD5E1] px-3 py-2 text-sm"
+                  />
+                )}
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-[#475569] mb-1">
+                  Date & Time
+                </label>
+                <input
+                  type="datetime-local"
+                  required
+                  value={scheduleForm.scheduledAt}
+                  onChange={(e) =>
+                    setScheduleForm((p) => ({ ...p, scheduledAt: e.target.value }))
+                  }
+                  className="w-full rounded-lg border border-[#CBD5E1] px-3 py-2 text-sm"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-[#475569] mb-1">
+                  Duration (Minutes)
+                </label>
+                <input
+                  type="number"
+                  min={15}
+                  max={180}
+                  value={scheduleForm.durationMinutes}
+                  onChange={(e) =>
+                    setScheduleForm((p) => ({
+                      ...p,
+                      durationMinutes: Number(e.target.value),
+                    }))
+                  }
+                  className="w-full rounded-lg border border-[#CBD5E1] px-3 py-2 text-sm"
+                />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs font-medium text-[#475569] mb-1">
+                  Session Focus / Topic Summary
+                </label>
+                <input
+                  type="text"
+                  value={scheduleForm.topicSummary}
+                  onChange={(e) =>
+                    setScheduleForm((p) => ({ ...p, topicSummary: e.target.value }))
+                  }
+                  placeholder="e.g. Equivalent fractions & word problems"
+                  className="w-full rounded-lg border border-[#CBD5E1] px-3 py-2 text-sm"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-[#475569] mb-1">
+                  Meeting Link (Zoom / Meet)
+                </label>
+                <input
+                  type="url"
+                  value={scheduleForm.meetingLink}
+                  onChange={(e) =>
+                    setScheduleForm((p) => ({ ...p, meetingLink: e.target.value }))
+                  }
+                  placeholder="https://zoom.us/j/..."
+                  className="w-full rounded-lg border border-[#CBD5E1] px-3 py-2 text-sm"
+                />
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setShowScheduleForm(false)}
+                className="rounded-lg border border-[#CBD5E1] px-4 py-2 text-xs font-medium text-[#475569]"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={scheduling}
+                className="rounded-lg px-4 py-2 text-xs font-semibold text-white disabled:opacity-60"
+                style={{ backgroundColor: DEEP_BLUE_THEME.colors.royal700 }}
+              >
+                {scheduling ? "Scheduling..." : "Save Session"}
+              </button>
+            </div>
+          </form>
+        )}
+
+        {/* Student Filter */}
+        <div className="rounded-xl bg-white border border-[#E2E8F0] p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+          <div className="flex-1 max-w-md">
+            <label className="block text-xs font-medium text-[#475569] mb-1">
+              Filter by Student
+            </label>
+            <select
+              value={selectedStudentId}
+              onChange={(e) => handleStudentFilterChange(e.target.value)}
+              className="w-full rounded-lg border border-[#CBD5E1] px-3 py-2 text-sm bg-white"
+            >
+              <option value="">All Accessible Students</option>
+              {students.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.firstName} {s.lastName}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="text-xs text-[#64748B]">
+            <span className="font-semibold text-[#0F172A]">{sessions.length}</span> session
+            {sessions.length === 1 ? "" : "s"}
+          </div>
+        </div>
+
+        {/* Sessions List + Selected Session Details & Notes */}
+        {loadingSessions ? (
+          <div className="rounded-xl bg-white border border-[#E2E8F0] p-8 text-center text-sm text-[#64748B]">
+            Loading tutoring sessions...
+          </div>
+        ) : sessions.length === 0 ? (
+          <div className="rounded-xl bg-white border border-[#E2E8F0] p-8 text-center">
+            <div className="text-base font-semibold text-[#0F172A]">
+              No tutoring sessions scheduled
+            </div>
+            <p className="mt-1 text-sm text-[#64748B]">
+              {canManageSessions
+                ? "Click '+ Schedule Session' above to book a 1-on-1 session."
+                : "Upcoming and completed 1-on-1 tutoring sessions will appear here."}
+            </p>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
+            {/* Left: Session List */}
+            <div className="lg:col-span-5 space-y-3">
+              {sessions.map((sess) => {
+                const isSelected = sess.id === selectedSessionId;
+                const st = studentMap.get(sess.studentId);
+                const when = new Date(sess.scheduledAt);
+                const whenText = Number.isNaN(when.getTime())
+                  ? sess.scheduledAt
+                  : when.toLocaleString(undefined, {
+                      dateStyle: "medium",
+                      timeStyle: "short",
+                    });
+
+                return (
+                  <button
+                    key={sess.id}
+                    type="button"
+                    onClick={() => setSelectedSessionId(sess.id)}
+                    className={`w-full text-left rounded-xl border p-4 transition-colors ${
+                      isSelected
+                        ? "bg-[#EFF6FF] border-[#1D4ED8]"
+                        : "bg-white border-[#E2E8F0] hover:border-[#93C5FD]"
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-xs font-semibold text-[#1D4ED8]">
+                        {whenText}
+                      </span>
+                      <span
+                        className={`rounded-full px-2.5 py-0.5 text-xs font-semibold ${getSessionStatusBadge(
+                          sess.status,
+                        )}`}
+                      >
+                        {sess.status.replace("_", " ")}
+                      </span>
+                    </div>
+
+                    <div className="mt-1.5 text-sm font-semibold text-[#0F172A]">
+                      {st
+                        ? `${st.firstName} ${st.lastName} (${formatGrade(st.gradeLevel)})`
+                        : `Student: ${sess.studentId}`}
+                    </div>
+
+                    <div className="mt-1 text-xs text-[#475569]">
+                      {sess.topicSummary || "1-on-1 Tutoring Session"} • {sess.durationMinutes} mins
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* Right: Session Controls & Notes */}
+            <div className="lg:col-span-7 rounded-xl bg-white border border-[#E2E8F0] p-5 space-y-5">
+              {selectedSession ? (
+                <>
+                  <div className="border-b border-[#E2E8F0] pb-4 flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                      <div className="text-xs font-semibold uppercase tracking-wider text-[#1D4ED8]">
+                        Session Details
+                      </div>
+                      <h3 className="text-lg font-bold text-[#0F172A] mt-0.5">
+                        {selectedSession.topicSummary || "1-on-1 Tutoring Session"}
+                      </h3>
+                      <p className="text-xs text-[#64748B] mt-1">
+                        Tutor: {selectedSession.tutorEmail} • Duration:{" "}
+                        {selectedSession.durationMinutes} mins
+                      </p>
+                    </div>
+
+                    <span
+                      className={`rounded-full px-3 py-1 text-xs font-semibold ${getSessionStatusBadge(
+                        selectedSession.status,
+                      )}`}
+                    >
+                      {selectedSession.status.replace("_", " ")}
+                    </span>
+                  </div>
+
+                  {selectedSession.meetingLink && (
+                    <div className="rounded-lg bg-[#EFF6FF] border border-[#DBEAFE] p-3.5 flex items-center justify-between gap-3">
+                      <div className="text-xs text-[#1E3A8A] truncate">
+                        Meeting Link:{" "}
+                        <span className="font-medium">{selectedSession.meetingLink}</span>
+                      </div>
+                      <a
+                        href={selectedSession.meetingLink}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="shrink-0 rounded-lg px-3 py-1.5 text-xs font-semibold text-white"
+                        style={{ backgroundColor: DEEP_BLUE_THEME.colors.royal700 }}
+                      >
+                        Join Session
+                      </a>
+                    </div>
+                  )}
+
+                  {canManageSessions && (
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-xs font-medium text-[#475569] mr-1">
+                        Mark Status:
+                      </span>
+                      {(["scheduled", "completed", "cancelled"] as const).map((stVal) => (
+                        <button
+                          key={stVal}
+                          type="button"
+                          onClick={() => void handleUpdateSessionStatus(selectedSession.id, stVal)}
+                          className={`rounded-lg px-3 py-1.5 text-xs font-semibold border transition-colors ${
+                            selectedSession.status === stVal
+                              ? "bg-[#0F172A] text-white border-[#0F172A]"
+                              : "bg-white text-[#0F172A] border-[#CBD5E1] hover:bg-[#F8FAFC]"
+                          }`}
+                        >
+                          {stVal.charAt(0).toUpperCase() + stVal.slice(1)}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Session Notes */}
+                  <div className="space-y-3 pt-2 border-t border-[#E2E8F0]">
+                    <h4 className="text-sm font-semibold text-[#0F172A]">
+                      Session Notes & Takeaways
+                    </h4>
+
+                    {loadingNotes ? (
+                      <div className="text-xs text-[#64748B]">Loading notes...</div>
+                    ) : notes.length === 0 ? (
+                      <div className="rounded-lg bg-[#F8FAFC] border border-[#E2E8F0] p-3.5 text-xs text-[#64748B]">
+                        No session notes recorded yet.
+                      </div>
+                    ) : (
+                      <div className="space-y-2.5">
+                        {notes.map((n) => (
+                          <div
+                            key={n.id}
+                            className="rounded-lg border border-[#E2E8F0] p-3.5 bg-[#F8FAFC]"
+                          >
+                            <p className="text-sm text-[#0F172A] whitespace-pre-wrap">
+                              {n.noteText}
+                            </p>
+                            <div className="mt-1.5 text-[11px] text-[#64748B]">
+                              By {n.authorEmail}
+                              {n.createdAt
+                                ? ` • ${new Date(n.createdAt).toLocaleDateString()}`
+                                : ""}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {canManageSessions && (
+                      <form onSubmit={handleAddNote} className="space-y-2 pt-2">
+                        <textarea
+                          rows={2}
+                          value={newNoteText}
+                          onChange={(e) => setNewNoteText(e.target.value)}
+                          placeholder="Add post-session summary, strengths, or next steps for the student & parent..."
+                          className="w-full rounded-lg border border-[#CBD5E1] px-3 py-2 text-sm"
+                        />
+                        <div className="flex justify-end">
+                          <button
+                            type="submit"
+                            disabled={savingNote}
+                            className="rounded-lg px-4 py-2 text-xs font-semibold text-white disabled:opacity-60"
+                            style={{ backgroundColor: DEEP_BLUE_THEME.colors.royal700 }}
+                          >
+                            {savingNote ? "Saving Note..." : "Add Session Note"}
+                          </button>
+                        </div>
+                      </form>
+                    )}
+                  </div>
+                </>
+              ) : null}
+            </div>
+          </div>
+        )}
+      </div>
+    </Layout>
   );
 }

@@ -9,7 +9,6 @@ import { useState } from "react";
 import { Links, Meta, Outlet, Scripts, ScrollRestoration } from "react-router";
 import type { LinksFunction } from "react-router";
 
-import { Layout as AppLayout } from "@/components/layout/Layout";
 import { AppToolkitProvider } from "@/components/ui/toolkit-provider";
 import { useNavigationState } from "@/hooks/use-navigation-state";
 import { APP_NAME, APP_TITLE } from "@/lib/app-config";
@@ -81,9 +80,7 @@ export default function Root() {
     <AppToolkitProvider>
       <AppProviders queryClient={queryClient}>
         <DbSyncSetup />
-        <AppLayout>
-          <Outlet />
-        </AppLayout>
+        <Outlet />
       </AppProviders>
     </AppToolkitProvider>
   );

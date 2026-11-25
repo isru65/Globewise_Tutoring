@@ -8,6 +8,20 @@
       "when": 1794397895571,
       "tag": "0000_sweet_tombstone",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1795507945272,
+      "tag": "0001_steep_shinobi_shaw",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1795549206367,
+      "tag": "0002_past_scrambler",
+      "breakpoints": true
     }
   ]
 }

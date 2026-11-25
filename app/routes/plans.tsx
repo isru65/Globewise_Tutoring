@@ -1,244 +1,815 @@
-import { useActionMutation, useActionQuery } from "@agent-native/core/client/hooks";
-import { useState, type FormEvent } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "react-router";
+import Layout from "../components/layout/Layout.js";
+import { DEEP_BLUE_THEME } from "../design-system.js";
+import useCurrentUser from "../hooks/use-current-user.js";
 
-import { EmptyState, ErrorNote, FieldLabel, PageHeader, Section, StatusBadge, fieldClass } from "@/components/app/primitives";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { useCurrentUser } from "@/hooks/use-current-user";
-import { errorText, formatDate } from "@/lib/globewise";
-
-export function meta() {
-  return [{ title: "Weekly plans · Globewise Tutoring" }];
+export interface LearningPlanRecord {
+  id: string;
+  studentId: string;
+  weekStart: string;
+  status: string;
+  tutorNotes?: string;
+  createdByEmail: string;
+  publishedAt?: string | null;
+  createdAt?: string;
 }
 
-const ACTIVITY_TYPES = ["Lesson", "Reading", "Video", "Practice", "Coding Activity", "Assessment"] as const;
+export interface LearningPlanItemRecord {
+  id: string;
+  planId: string;
+  topicId?: string | null;
+  title: string;
+  activityType: string;
+  estimatedMinutes: number;
+  completed: boolean;
+  completedAt?: string | null;
+  sortOrder?: number;
+}
 
-type Item = { title: string; activityType: (typeof ACTIVITY_TYPES)[number]; estimatedMinutes: number; topicId?: string | undefined };
+interface StudentSummary {
+  id: string;
+  firstName: string;
+  lastName: string;
+  gradeLevel: number;
+}
 
-function PlanBuilder({ students }: { students: { id: string; firstName: string; lastName: string }[] }) {
-  const create = useActionMutation("create-learning-plan");
-  const topics = useActionQuery("list-topics", {});
-  const [studentId, setStudentId] = useState("");
-  const [weekStart, setWeekStart] = useState("");
-  const [tutorNotes, setTutorNotes] = useState("");
-  const [items, setItems] = useState<Item[]>([{ title: "", activityType: "Lesson", estimatedMinutes: 30 }]);
-  const chosenStudent = studentId || students[0]?.id || "";
+function getDefaultWeekStart(): string {
+  const now = new Date();
+  const day = now.getUTCDay();
+  const diffToMonday = day === 0 ? -6 : 1 - day;
+  const monday = new Date(
+    Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + diffToMonday),
+  );
+  return monday.toISOString().slice(0, 10);
+}
 
-  function update(index: number, patch: Partial<Item>) {
-    setItems((list) => list.map((item, i) => (i === index ? { ...item, ...patch } : item)));
+function getPlanStatusBadge(status: string): string {
+  switch (status) {
+    case "published":
+    case "active":
+      return "bg-[#DCFCE7] text-[#166534]";
+    case "completed":
+      return "bg-[#E0F2FE] text-[#075985]";
+    case "pending_review":
+    case "approved":
+      return "bg-[#FEF3C7] text-[#92400E]";
+    default:
+      return "bg-[#F1F5F9] text-[#475569]";
+  }
+}
+
+export default function PlansRoute() {
+  const { user, loading: userLoading, refresh: refreshUser } = useCurrentUser();
+  const [searchParams, setSearchParams] = useSearchParams();
+
+  const initialStudentId = searchParams.get("studentId") || "";
+
+  const [students, setStudents] = useState<StudentSummary[]>([]);
+  const [selectedStudentId, setSelectedStudentId] = useState<string>(initialStudentId);
+  const [plans, setPlans] = useState<LearningPlanRecord[]>([]);
+  const [selectedPlanId, setSelectedPlanId] = useState<string>("");
+  const [items, setItems] = useState<LearningPlanItemRecord[]>([]);
+
+  const [loadingPlans, setLoadingPlans] = useState<boolean>(true);
+  const [loadingItems, setLoadingItems] = useState<boolean>(false);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  // Create plan form state (Tutor / Admin)
+  const [showCreatePlan, setShowCreatePlan] = useState<boolean>(false);
+  const [creatingPlan, setCreatingPlan] = useState<boolean>(false);
+  const [planForm, setPlanForm] = useState({
+    studentId: initialStudentId,
+    weekStart: getDefaultWeekStart(),
+    tutorNotes: "",
+  });
+
+  // Add item form state (Tutor / Admin)
+  const [newItem, setNewItem] = useState({
+    title: "",
+    activityType: "Lesson",
+    estimatedMinutes: 30,
+  });
+  const [addingItem, setAddingItem] = useState<boolean>(false);
+
+  const canManagePlans = user?.role === "tutor" || user?.role === "admin";
+  const canCompleteItems =
+    user?.role === "student" || user?.role === "tutor" || user?.role === "admin";
+
+  const loadAccessibleStudents = useCallback(async () => {
+    try {
+      const res = await fetch("/api/v1/me?page=1&page_size=100", {
+        credentials: "include",
+        headers: { Accept: "application/json" },
+      });
+      if (!res.ok) return;
+      const payload = await res.json();
+      const list: StudentSummary[] = Array.isArray(payload?.data?.accessibleStudents?.data)
+        ? payload.data.accessibleStudents.data
+        : [];
+      setStudents(list);
+
+      const firstStudent = list[0];
+      if (!selectedStudentId && firstStudent && user?.role !== "admin") {
+        setSelectedStudentId(firstStudent.id);
+        setPlanForm((prev) => ({ ...prev, studentId: firstStudent.id }));
+      }
+    } catch {
+      // Non-blocking fallback
+    }
+  }, [selectedStudentId, user?.role]);
+
+  const loadPlans = useCallback(async () => {
+    setLoadingPlans(true);
+    setError(null);
+    try {
+      const qs = new URLSearchParams();
+      if (selectedStudentId) qs.set("studentId", selectedStudentId);
+
+      const url = `/api/v1/learning-plans${qs.toString() ? `?${qs.toString()}` : ""}`;
+      const res = await fetch(url, {
+        credentials: "include",
+        headers: { Accept: "application/json" },
+      });
+
+      if (res.status === 404) {
+        setPlans([]);
+        setLoadingPlans(false);
+        return;
+      }
+
+      if (!res.ok) {
+        throw new Error(`Unable to load weekly learning plans (${res.status})`);
+      }
+
+      const payload = await res.json();
+      const list: LearningPlanRecord[] = Array.isArray(payload?.data)
+        ? payload.data
+        : Array.isArray(payload?.data?.items)
+          ? payload.data.items
+          : [];
+
+      // Students only see published/active/completed plans once published
+      const visiblePlans =
+        user?.role === "student"
+          ? list.filter((p) => p.status !== "draft")
+          : list;
+
+      setPlans(visiblePlans);
+      const firstPlan = visiblePlans[0];
+      if (firstPlan) {
+        const exists = visiblePlans.some((p) => p.id === selectedPlanId);
+        if (!exists) {
+          setSelectedPlanId(firstPlan.id);
+        }
+      } else {
+        setSelectedPlanId("");
+        setItems([]);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load learning plans");
+    } finally {
+      setLoadingPlans(false);
+    }
+  }, [selectedStudentId, selectedPlanId, user?.role]);
+
+  const loadPlanItems = useCallback(async (planId: string) => {
+    if (!planId) {
+      setItems([]);
+      return;
+    }
+    setLoadingItems(true);
+    try {
+      const res = await fetch(
+        `/api/v1/learning-plan-items?planId=${encodeURIComponent(planId)}`,
+        {
+          credentials: "include",
+          headers: { Accept: "application/json" },
+        },
+      );
+      if (!res.ok) {
+        setItems([]);
+        setLoadingItems(false);
+        return;
+      }
+      const payload = await res.json();
+      const list: LearningPlanItemRecord[] = Array.isArray(payload?.data)
+        ? payload.data
+        : Array.isArray(payload?.data?.items)
+          ? payload.data.items
+          : [];
+      setItems([...list].sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0)));
+    } catch {
+      setItems([]);
+    } finally {
+      setLoadingItems(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!userLoading) {
+      void loadAccessibleStudents();
+      void loadPlans();
+    }
+  }, [userLoading, loadAccessibleStudents, loadPlans]);
+
+  useEffect(() => {
+    void loadPlanItems(selectedPlanId);
+  }, [selectedPlanId, loadPlanItems]);
+
+  const studentLabelById = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const s of students) {
+      map.set(s.id, `${s.firstName} ${s.lastName} (Grade ${s.gradeLevel === 0 ? "K" : s.gradeLevel})`);
+    }
+    return map;
+  }, [students]);
+
+  const selectedPlan = useMemo(
+    () => plans.find((p) => p.id === selectedPlanId) ?? null,
+    [plans, selectedPlanId],
+  );
+
+  const completionSummary = useMemo(() => {
+    const total = items.length;
+    const completed = items.filter((i) => i.completed).length;
+    const percent = total > 0 ? Math.round((completed / total) * 100) : 0;
+    return { total, completed, percent };
+  }, [items]);
+
+  function handleStudentFilterChange(nextStudentId: string) {
+    setSelectedStudentId(nextStudentId);
+    setPlanForm((prev) => ({ ...prev, studentId: nextStudentId || prev.studentId }));
+    const nextParams = new URLSearchParams(searchParams);
+    if (nextStudentId) {
+      nextParams.set("studentId", nextStudentId);
+    } else {
+      nextParams.delete("studentId");
+    }
+    setSearchParams(nextParams, { replace: true });
   }
 
-  function submit(event: FormEvent) {
-    event.preventDefault();
-    const cleaned = items.filter((item) => item.title.trim());
-    create.mutate(
-      { studentId: chosenStudent, weekStart, tutorNotes, items: cleaned },
-      {
-        onSuccess: () => {
-          setItems([{ title: "", activityType: "Lesson", estimatedMinutes: 30 }]);
-          setTutorNotes("");
+  async function handleCreatePlan(e: React.FormEvent) {
+    e.preventDefault();
+    if (!canManagePlans) return;
+    const targetStudentId = planForm.studentId || selectedStudentId;
+    if (!targetStudentId) {
+      setError("Please select a student for the weekly plan.");
+      return;
+    }
+
+    setCreatingPlan(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const res = await fetch("/api/v1/learning-plans", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          studentId: targetStudentId,
+          weekStart: planForm.weekStart,
+          tutorNotes: planForm.tutorNotes.trim(),
+        }),
+      });
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(payload?.error?.message || `Failed to create plan (${res.status})`);
+      }
+
+      setPlanForm((prev) => ({ ...prev, tutorNotes: "" }));
+      setShowCreatePlan(false);
+      setNotice("Weekly learning plan created as draft.");
+      await loadPlans();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not create learning plan");
+    } finally {
+      setCreatingPlan(false);
+    }
+  }
+
+  async function handlePublishPlan(planId: string) {
+    if (!canManagePlans) return;
+    setError(null);
+    setNotice(null);
+    try {
+      const res = await fetch(`/api/v1/learning-plans/${encodeURIComponent(planId)}/status`, {
+        method: "PATCH",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status: "published" }),
+      });
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(payload?.error?.message || `Failed to publish plan (${res.status})`);
+      }
+      setNotice("Weekly plan published and visible to student & parent.");
+      await loadPlans();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not publish plan");
+    }
+  }
+
+  async function handleAddItem(e: React.FormEvent) {
+    e.preventDefault();
+    if (!canManagePlans || !selectedPlanId || !newItem.title.trim()) return;
+
+    setAddingItem(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const res = await fetch("/api/v1/learning-plan-items", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          planId: selectedPlanId,
+          title: newItem.title.trim(),
+          activityType: newItem.activityType,
+          estimatedMinutes: Number(newItem.estimatedMinutes) || 30,
+          sortOrder: items.length + 1,
+        }),
+      });
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(payload?.error?.message || `Failed to add item (${res.status})`);
+      }
+      setNewItem((prev) => ({ ...prev, title: "" }));
+      setNotice("Plan item added.");
+      await loadPlanItems(selectedPlanId);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not add plan item");
+    } finally {
+      setAddingItem(false);
+    }
+  }
+
+  async function handleToggleComplete(item: LearningPlanItemRecord) {
+    if (!canCompleteItems) return;
+    setError(null);
+    try {
+      const res = await fetch(
+        `/api/v1/learning-plan-items/${encodeURIComponent(item.id)}/complete`,
+        {
+          method: "PATCH",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ completed: !item.completed }),
         },
-      },
+      );
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(payload?.error?.message || `Failed to update item (${res.status})`);
+      }
+      await loadPlanItems(selectedPlanId);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not update item completion");
+    }
+  }
+
+  if (userLoading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-[#0F172A] text-white text-sm">
+        Loading weekly learning plans...
+      </div>
     );
   }
 
   return (
-    <Section title="New weekly plan" description="Plans start as drafts. Send them for review, approve, then publish to the student.">
-      <form onSubmit={submit} className="space-y-5">
-        <div className="grid gap-4 md:grid-cols-3">
-          <label className="block">
-            <FieldLabel>Student</FieldLabel>
-            <select className={fieldClass} value={chosenStudent} onChange={(e) => setStudentId(e.target.value)}>
+    <Layout
+      title="Weekly Learning Plans"
+      breadcrumbs={[
+        { label: "Home", to: "/" },
+        { label: "Weekly Plans" },
+      ]}
+      currentUser={user}
+      onSignOut={() => {
+        void refreshUser();
+      }}
+      headerActions={
+        canManagePlans ? (
+          <button
+            type="button"
+            onClick={() => setShowCreatePlan((prev) => !prev)}
+            className="rounded-lg px-3.5 py-2 text-xs sm:text-sm font-semibold text-white transition-colors"
+            style={{ backgroundColor: DEEP_BLUE_THEME.colors.royal700 }}
+          >
+            {showCreatePlan ? "Close Form" : "+ New Weekly Plan"}
+          </button>
+        ) : undefined
+      }
+    >
+      <div className="space-y-6">
+        {/* Deep Blue / Navy Banner */}
+        <div
+          className="rounded-xl p-5 sm:p-6 text-white"
+          style={{
+            background: `linear-gradient(120deg, ${DEEP_BLUE_THEME.colors.navy900} 0%, ${DEEP_BLUE_THEME.colors.navy800} 100%)`,
+          }}
+        >
+          <div className="text-xs font-semibold uppercase tracking-wider text-sky-300">
+            Weekly Learning Plan Workflow
+          </div>
+          <h2 className="mt-1 text-xl font-bold">
+            Structured Weekly Plans, Activities & Completion Tracking
+          </h2>
+          <p className="mt-1 text-sm text-blue-100/90 max-w-2xl">
+            Tutors organize weekly lessons, practice sets, coding activities, and quizzes; once
+            published, students complete items and parents monitor progress.
+          </p>
+        </div>
+
+        {notice && (
+          <div className="rounded-lg bg-[#DCFCE7] border border-[#BBF7D0] text-[#166534] px-4 py-2.5 text-xs font-medium">
+            {notice}
+          </div>
+        )}
+
+        {error && (
+          <div className="rounded-lg bg-[#FEE2E2] border border-[#FECACA] text-[#991B1B] px-4 py-2.5 text-xs font-medium flex items-center justify-between gap-4">
+            <span>{error}</span>
+            <button
+              type="button"
+              onClick={() => setError(null)}
+              className="underline font-semibold"
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
+
+        {/* Create Weekly Plan Form (Tutors & Admins) */}
+        {canManagePlans && showCreatePlan && (
+          <form
+            onSubmit={handleCreatePlan}
+            className="rounded-xl bg-white border border-[#CBD5E1] p-5 space-y-4 shadow-xs"
+          >
+            <h3 className="text-base font-semibold text-[#0F172A]">
+              Create Weekly Learning Plan
+            </h3>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs font-medium text-[#475569] mb-1">
+                  Student
+                </label>
+                {students.length > 0 ? (
+                  <select
+                    value={planForm.studentId}
+                    onChange={(e) =>
+                      setPlanForm((p) => ({ ...p, studentId: e.target.value }))
+                    }
+                    className="w-full rounded-lg border border-[#CBD5E1] px-3 py-2 text-sm bg-white"
+                  >
+                    {students.map((s) => (
+                      <option key={s.id} value={s.id}>
+                        {s.firstName} {s.lastName}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <input
+                    type="text"
+                    required
+                    value={planForm.studentId}
+                    onChange={(e) =>
+                      setPlanForm((p) => ({ ...p, studentId: e.target.value }))
+                    }
+                    placeholder="Student ID"
+                    className="w-full rounded-lg border border-[#CBD5E1] px-3 py-2 text-sm"
+                  />
+                )}
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-[#475569] mb-1">
+                  Week Starting (Monday)
+                </label>
+                <input
+                  type="date"
+                  required
+                  value={planForm.weekStart}
+                  onChange={(e) =>
+                    setPlanForm((p) => ({ ...p, weekStart: e.target.value }))
+                  }
+                  className="w-full rounded-lg border border-[#CBD5E1] px-3 py-2 text-sm"
+                />
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-xs font-medium text-[#475569] mb-1">
+                Tutor Notes & Weekly Focus
+              </label>
+              <textarea
+                rows={2}
+                value={planForm.tutorNotes}
+                onChange={(e) =>
+                  setPlanForm((p) => ({ ...p, tutorNotes: e.target.value }))
+                }
+                placeholder="Goals for this week's lessons, coding practice, or quiz..."
+                className="w-full rounded-lg border border-[#CBD5E1] px-3 py-2 text-sm"
+              />
+            </div>
+
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setShowCreatePlan(false)}
+                className="rounded-lg border border-[#CBD5E1] px-4 py-2 text-xs font-medium text-[#475569]"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={creatingPlan}
+                className="rounded-lg px-4 py-2 text-xs font-semibold text-white disabled:opacity-60"
+                style={{ backgroundColor: DEEP_BLUE_THEME.colors.royal700 }}
+              >
+                {creatingPlan ? "Creating..." : "Create Draft Plan"}
+              </button>
+            </div>
+          </form>
+        )}
+
+        {/* Student Filter */}
+        <div className="rounded-xl bg-white border border-[#E2E8F0] p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+          <div className="flex-1 max-w-md">
+            <label className="block text-xs font-medium text-[#475569] mb-1">
+              Filter by Student
+            </label>
+            <select
+              value={selectedStudentId}
+              onChange={(e) => handleStudentFilterChange(e.target.value)}
+              className="w-full rounded-lg border border-[#CBD5E1] px-3 py-2 text-sm bg-white"
+            >
+              <option value="">All Accessible Students</option>
               {students.map((s) => (
-                <option key={s.id} value={s.id}>{s.firstName} {s.lastName}</option>
+                <option key={s.id} value={s.id}>
+                  {s.firstName} {s.lastName}
+                </option>
               ))}
             </select>
-          </label>
-          <label className="block">
-            <FieldLabel>Week starting</FieldLabel>
-            <Input type="date" required value={weekStart} onChange={(e) => setWeekStart(e.target.value)} />
-          </label>
-          <label className="block">
-            <FieldLabel>Tutor notes</FieldLabel>
-            <Input value={tutorNotes} onChange={(e) => setTutorNotes(e.target.value)} />
-          </label>
+          </div>
+          <div className="text-xs text-[#64748B]">
+            <span className="font-semibold text-[#0F172A]">{plans.length}</span> weekly plan
+            {plans.length === 1 ? "" : "s"}
+          </div>
         </div>
 
-        <div className="space-y-3">
-          {items.map((item, index) => (
-            <div key={index} className="grid gap-3 md:grid-cols-[1.6fr_1fr_1fr_1.2fr_auto] md:items-end">
-              <label className="block">
-                <FieldLabel>Activity</FieldLabel>
-                <Input value={item.title} onChange={(e) => update(index, { title: e.target.value })} placeholder="e.g. Equivalent fractions practice" />
-              </label>
-              <label className="block">
-                <FieldLabel>Type</FieldLabel>
-                <select className={fieldClass} value={item.activityType} onChange={(e) => update(index, { activityType: e.target.value as Item["activityType"] })}>
-                  {ACTIVITY_TYPES.map((t) => (
-                    <option key={t}>{t}</option>
-                  ))}
-                </select>
-              </label>
-              <label className="block">
-                <FieldLabel>Minutes</FieldLabel>
-                <Input type="number" min={5} max={240} value={item.estimatedMinutes} onChange={(e) => update(index, { estimatedMinutes: Number(e.target.value) })} />
-              </label>
-              <label className="block">
-                <FieldLabel>Curriculum topic</FieldLabel>
-                <select className={fieldClass} value={item.topicId ?? ""} onChange={(e) => update(index, { topicId: e.target.value || undefined })}>
-                  <option value="">None</option>
-                  {(topics.data ?? []).map((t) => (
-                    <option key={t.id} value={t.id}>{t.title}</option>
-                  ))}
-                </select>
-              </label>
-              <Button type="button" variant="ghost" size="sm" disabled={items.length === 1} onClick={() => setItems((list) => list.filter((_, i) => i !== index))}>
-                Remove
-              </Button>
+        {/* Plans List + Selected Plan Items */}
+        {loadingPlans ? (
+          <div className="rounded-xl bg-white border border-[#E2E8F0] p-8 text-center text-sm text-[#64748B]">
+            Loading weekly learning plans...
+          </div>
+        ) : plans.length === 0 ? (
+          <div className="rounded-xl bg-white border border-[#E2E8F0] p-8 text-center">
+            <div className="text-base font-semibold text-[#0F172A]">
+              No weekly learning plans available
             </div>
-          ))}
-          <Button type="button" variant="outline" size="sm" onClick={() => setItems((list) => [...list, { title: "", activityType: "Lesson", estimatedMinutes: 30 }])}>
-            Add activity
-          </Button>
-        </div>
-
-        <div className="flex items-center justify-between gap-3 border-t border-border pt-4">
-          <ErrorNote error={create.error ? new Error(errorText(create.error)) : null} />
-          <Button type="submit" disabled={create.isPending || !chosenStudent || !weekStart}>Create draft plan</Button>
-        </div>
-      </form>
-    </Section>
-  );
-}
-
-const NEXT_ACTIONS: Record<string, { to: string; label: string; variant?: "outline" | "default" }[]> = {
-  draft: [{ to: "pending_review", label: "Send for review", variant: "outline" }],
-  pending_review: [
-    { to: "approved", label: "Approve" },
-    { to: "draft", label: "Return to draft", variant: "outline" },
-  ],
-  approved: [{ to: "published", label: "Publish to student" }],
-  published: [{ to: "archived", label: "Archive", variant: "outline" }],
-  in_progress: [{ to: "archived", label: "Archive", variant: "outline" }],
-  completed: [{ to: "archived", label: "Archive", variant: "outline" }],
-};
-
-function PlanDetail({ planId, isStaff, canComplete, studentName }: { planId: string; isStaff: boolean; canComplete: boolean; studentName: string }) {
-  const plans = useActionQuery("list-learning-plans", {});
-  const items = useActionQuery("list-plan-items", { planId });
-  const transition = useActionMutation("update-learning-plan-status");
-  const complete = useActionMutation("complete-plan-item");
-  const plan = (plans.data ?? []).find((p) => p.id === planId);
-  if (!plan) return null;
-  const done = (items.data ?? []).filter((i) => i.completed).length;
-  const total = items.data?.length ?? 0;
-  const actions = isStaff ? NEXT_ACTIONS[plan.status] ?? [] : [];
-
-  return (
-    <Section
-      title={`${studentName} · week of ${formatDate(plan.weekStart)}`}
-      description={plan.tutorNotes || "No tutor notes"}
-      action={<StatusBadge status={plan.status} />}
-    >
-      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-        <p className="text-sm text-muted-foreground">{done} of {total} activities complete</p>
-        <div className="flex flex-wrap gap-2">
-          {actions.map((a) => (
-            <Button key={a.to} size="sm" variant={a.variant ?? "default"} disabled={transition.isPending} onClick={() => transition.mutate({ id: planId, status: a.to as never })}>
-              {a.label}
-            </Button>
-          ))}
-        </div>
-      </div>
-      {(items.data ?? []).length === 0 ? (
-        <EmptyState title="No activities in this plan" />
-      ) : (
-        <ul className="divide-y divide-border">
-          {(items.data ?? []).map((item) => (
-            <li key={item.id} className="flex items-center gap-3 py-3">
-              {canComplete ? (
-                <input
-                  type="checkbox"
-                  aria-label={`Mark ${item.title} complete`}
-                  className="size-4 accent-primary"
-                  checked={item.completed}
-                  disabled={complete.isPending}
-                  onChange={(e) => complete.mutate({ itemId: item.id, completed: e.target.checked })}
-                />
-              ) : null}
-              <div className="min-w-0 flex-1">
-                <p className={`text-sm font-medium ${item.completed ? "text-muted-foreground line-through" : "text-foreground"}`}>{item.title}</p>
-                <p className="text-xs text-muted-foreground">{item.activityType} · {item.estimatedMinutes} min</p>
-              </div>
-              {item.completed ? <StatusBadge status="completed" /> : null}
-            </li>
-          ))}
-        </ul>
-      )}
-      <div className="mt-3 space-y-2">
-        <ErrorNote error={transition.error ? new Error(errorText(transition.error)) : null} />
-        <ErrorNote error={complete.error ? new Error(errorText(complete.error)) : null} />
-      </div>
-    </Section>
-  );
-}
-
-export default function PlansRoute() {
-  const { user } = useCurrentUser();
-  const plans = useActionQuery("list-learning-plans", {});
-  const students = useActionQuery("list-students", {});
-  const [selected, setSelected] = useState<string | null>(null);
-  const isStaff = user?.role === "tutor" || user?.role === "admin";
-  const canComplete = user?.role === "student" || user?.role === "admin";
-  const names = new Map((students.data ?? []).map((s) => [s.id, `${s.firstName} ${s.lastName}`]));
-  const selectedPlan = (plans.data ?? []).find((p) => p.id === selected);
-
-  return (
-    <>
-      <PageHeader
-        title={user?.role === "student" ? "My learning" : "Weekly plans"}
-        description="Plans follow the Draft → Pending Review → Approved → Published → In Progress → Completed → Archived workflow."
-      />
-      {user?.role === "tutor" || user?.role === "admin" ? <PlanBuilder students={students.data ?? []} /> : null}
-
-      <Section title="Plans" className="mt-6">
-        {(plans.data ?? []).length === 0 ? (
-          <EmptyState title="No plans yet" description="Published plans appear here for students and families." />
+            <p className="mt-1 text-sm text-[#64748B]">
+              {canManagePlans
+                ? "Click '+ New Weekly Plan' to build a weekly learning schedule for a student."
+                : "Your weekly learning plan will appear here once published by your tutor."}
+            </p>
+          </div>
         ) : (
-          <ul className="grid gap-3 md:grid-cols-2">
-            {(plans.data ?? []).map((p) => (
-              <li key={p.id}>
-                <button
-                  type="button"
-                  aria-pressed={selected === p.id}
-                  onClick={() => setSelected(p.id)}
-                  className={`w-full rounded-md border p-4 text-left transition-colors hover:bg-accent/40 ${selected === p.id ? "border-primary" : "border-border"}`}
-                >
-                  <div className="flex items-start justify-between gap-3">
-                    <div>
-                      <p className="text-sm font-medium text-foreground">{names.get(p.studentId) ?? "Student"}</p>
-                      <p className="text-xs text-muted-foreground">Week of {formatDate(p.weekStart)}</p>
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
+            {/* Left: Weekly Plans */}
+            <div className="lg:col-span-4 space-y-3">
+              {plans.map((plan) => {
+                const active = plan.id === selectedPlanId;
+                return (
+                  <button
+                    key={plan.id}
+                    type="button"
+                    onClick={() => setSelectedPlanId(plan.id)}
+                    className={`w-full text-left rounded-xl border p-4 transition-colors ${
+                      active
+                        ? "bg-[#EFF6FF] border-[#1D4ED8]"
+                        : "bg-white border-[#E2E8F0] hover:border-[#93C5FD]"
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-xs font-semibold text-[#1D4ED8]">
+                        Week of {plan.weekStart}
+                      </span>
+                      <span
+                        className={`rounded-full px-2.5 py-0.5 text-xs font-semibold ${getPlanStatusBadge(
+                          plan.status,
+                        )}`}
+                      >
+                        {plan.status.replace("_", " ")}
+                      </span>
                     </div>
-                    <StatusBadge status={p.status} />
-                  </div>
-                </button>
-              </li>
-            ))}
-          </ul>
-        )}
-      </Section>
+                    <div className="mt-1.5 text-sm font-semibold text-[#0F172A]">
+                      {studentLabelById.get(plan.studentId) ?? `Student: ${plan.studentId}`}
+                    </div>
+                    {plan.tutorNotes && (
+                      <p className="mt-1 text-xs text-[#475569] line-clamp-2">
+                        {plan.tutorNotes}
+                      </p>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
 
-      {selectedPlan ? (
-        <div className="mt-6">
-          <PlanDetail
-            key={selectedPlan.id}
-            planId={selectedPlan.id}
-            isStaff={isStaff}
-            canComplete={canComplete}
-            studentName={names.get(selectedPlan.studentId) ?? "Student"}
-          />
-        </div>
-      ) : null}
-    </>
+            {/* Right: Selected Plan Items & Completion */}
+            <div className="lg:col-span-8 rounded-xl bg-white border border-[#E2E8F0] p-5 space-y-5">
+              {selectedPlan ? (
+                <>
+                  <div className="border-b border-[#E2E8F0] pb-4 flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                      <div className="text-xs font-semibold uppercase tracking-wider text-[#1D4ED8]">
+                        Week Starting {selectedPlan.weekStart}
+                      </div>
+                      <h3 className="text-base font-bold text-[#0F172A] mt-0.5">
+                        {studentLabelById.get(selectedPlan.studentId) ??
+                          `Student: ${selectedPlan.studentId}`}
+                      </h3>
+                      {selectedPlan.tutorNotes && (
+                        <p className="mt-1 text-sm text-[#475569]">
+                          {selectedPlan.tutorNotes}
+                        </p>
+                      )}
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <span
+                        className={`rounded-full px-3 py-1 text-xs font-semibold ${getPlanStatusBadge(
+                          selectedPlan.status,
+                        )}`}
+                      >
+                        {selectedPlan.status.replace("_", " ")}
+                      </span>
+                      {canManagePlans && selectedPlan.status === "draft" && (
+                        <button
+                          type="button"
+                          onClick={() => void handlePublishPlan(selectedPlan.id)}
+                          className="rounded-lg px-3 py-1.5 text-xs font-semibold text-white"
+                          style={{ backgroundColor: DEEP_BLUE_THEME.colors.royal700 }}
+                        >
+                          Publish Plan
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Completion Progress Bar */}
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between text-xs font-medium text-[#475569]">
+                      <span>Weekly Activity Completion</span>
+                      <span className="font-semibold text-[#0F172A]">
+                        {completionSummary.completed} / {completionSummary.total} (
+                        {completionSummary.percent}%)
+                      </span>
+                    </div>
+                    <div className="h-2.5 w-full rounded-full bg-[#E2E8F0] overflow-hidden">
+                      <div
+                        className="h-full rounded-full transition-all duration-300"
+                        style={{
+                          width: `${completionSummary.percent}%`,
+                          backgroundColor: DEEP_BLUE_THEME.colors.royal700,
+                        }}
+                      />
+                    </div>
+                  </div>
+
+                  {/* Plan Items List */}
+                  {loadingItems ? (
+                    <div className="text-xs text-[#64748B] py-4">
+                      Loading plan activities...
+                    </div>
+                  ) : items.length === 0 ? (
+                    <div className="rounded-lg bg-[#F8FAFC] border border-[#E2E8F0] p-4 text-xs text-[#64748B]">
+                      No learning activities added to this plan yet.
+                    </div>
+                  ) : (
+                    <div className="divide-y divide-[#E2E8F0] border border-[#E2E8F0] rounded-lg overflow-hidden">
+                      {items.map((item) => (
+                        <div
+                          key={item.id}
+                          className="p-3.5 bg-white flex items-center justify-between gap-3"
+                        >
+                          <div className="flex items-start gap-3 min-w-0">
+                            <input
+                              type="checkbox"
+                              checked={item.completed}
+                              disabled={!canCompleteItems}
+                              onChange={() => void handleToggleComplete(item)}
+                              aria-label={`Mark ${item.title} completed`}
+                              className="mt-1 h-4 w-4 rounded border-[#CBD5E1] text-[#1D4ED8] focus:ring-[#1D4ED8] disabled:opacity-50"
+                            />
+                            <div className="min-w-0">
+                              <div
+                                className={`text-sm font-semibold ${
+                                  item.completed
+                                    ? "line-through text-[#64748B]"
+                                    : "text-[#0F172A]"
+                                }`}
+                              >
+                                {item.title}
+                              </div>
+                              <div className="text-xs text-[#64748B] mt-0.5">
+                                {item.activityType} • {item.estimatedMinutes} mins
+                              </div>
+                            </div>
+                          </div>
+
+                          <span
+                            className={`shrink-0 rounded-full px-2.5 py-0.5 text-xs font-semibold ${
+                              item.completed
+                                ? "bg-[#DCFCE7] text-[#166534]"
+                                : "bg-[#F1F5F9] text-[#475569]"
+                            }`}
+                          >
+                            {item.completed ? "Done" : "Pending"}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Add Plan Item Form (Tutors & Admins) */}
+                  {canManagePlans && (
+                    <form
+                      onSubmit={handleAddItem}
+                      className="pt-4 border-t border-[#E2E8F0] grid grid-cols-1 sm:grid-cols-12 gap-2.5 items-end"
+                    >
+                      <div className="sm:col-span-6">
+                        <label className="block text-xs font-medium text-[#475569] mb-1">
+                          Activity Title
+                        </label>
+                        <input
+                          type="text"
+                          required
+                          value={newItem.title}
+                          onChange={(e) =>
+                            setNewItem((p) => ({ ...p, title: e.target.value }))
+                          }
+                          placeholder="e.g. Fraction Equivalence Practice"
+                          className="w-full rounded-lg border border-[#CBD5E1] px-3 py-2 text-sm"
+                        />
+                      </div>
+
+                      <div className="sm:col-span-3">
+                        <label className="block text-xs font-medium text-[#475569] mb-1">
+                          Type
+                        </label>
+                        <select
+                          value={newItem.activityType}
+                          onChange={(e) =>
+                            setNewItem((p) => ({ ...p, activityType: e.target.value }))
+                          }
+                          className="w-full rounded-lg border border-[#CBD5E1] px-3 py-2 text-sm bg-white"
+                        >
+                          <option value="Lesson">Lesson</option>
+                          <option value="Practice">Practice</option>
+                          <option value="Coding">Coding</option>
+                          <option value="Assessment">Assessment</option>
+                          <option value="Session">Session</option>
+                        </select>
+                      </div>
+
+                      <div className="sm:col-span-1">
+                        <label className="block text-xs font-medium text-[#475569] mb-1">
+                          Mins
+                        </label>
+                        <input
+                          type="number"
+                          min={5}
+                          max={240}
+                          value={newItem.estimatedMinutes}
+                          onChange={(e) =>
+                            setNewItem((p) => ({
+                              ...p,
+                              estimatedMinutes: Number(e.target.value),
+                            }))
+                          }
+                          className="w-full rounded-lg border border-[#CBD5E1] px-2 py-2 text-sm"
+                        />
+                      </div>
+
+                      <div className="sm:col-span-2">
+                        <button
+                          type="submit"
+                          disabled={addingItem}
+                          className="w-full rounded-lg px-3 py-2 text-xs font-semibold text-white disabled:opacity-60"
+                          style={{ backgroundColor: DEEP_BLUE_THEME.colors.royal700 }}
+                        >
+                          {addingItem ? "Adding..." : "+ Add Item"}
+                        </button>
+                      </div>
+                    </form>
+                  )}
+                </>
+              ) : null}
+            </div>
+          </div>
+        )}
+      </div>
+    </Layout>
   );
 }
